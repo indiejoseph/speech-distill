@@ -63,12 +63,15 @@ class DistillationLoss(nn.Module):
         ce_mask = labels_masked != -100
         if ce_mask.sum() > 0:
             student_logits_ce = student_logits_masked[ce_mask]
+            teacher_logits_ce = teacher_logits_masked[ce_mask]
             labels_ce = labels_masked[ce_mask]
             task_loss = F.cross_entropy(student_logits_ce, labels_ce)
+            teacher_task_loss = F.cross_entropy(teacher_logits_ce, labels_ce)
         else:
             task_loss = torch.tensor(0.0).to(student_logits.device)
+            teacher_task_loss = torch.tensor(0.0).to(student_logits.device)
 
         # Combined loss
         total_loss = self.alpha * task_loss + (1 - self.alpha) * distill_loss
 
-        return total_loss, task_loss, distill_loss
+        return total_loss, task_loss, distill_loss, teacher_task_loss

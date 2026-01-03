@@ -67,6 +67,81 @@ def align_prefixes(teacher_prefix, student_prefix, tokenizer):
         return _align_single(teacher_prefix, student_prefix)
 
 
+class DistillationDataProcessor:
+    """
+    Picklable wrapper for dataset transformation.
+    """
+
+    def __init__(self, student_processor, teacher_processor):
+        self.student_processor = student_processor
+        self.teacher_processor = teacher_processor
+
+    def __call__(self, examples):
+        """Process examples for both student and teacher."""
+        # Check if we are receiving a batch or a single example
+        # In HF datasets, if batched=True, examples is a dict of lists
+        is_batched = isinstance(examples.get("text", examples.get("audio")), list)
+
+        if is_batched:
+            # Process for student
+            student_inputs = self.student_processor.process_batch(examples)
+            # Process for teacher
+            teacher_inputs = self.teacher_processor.process_batch(examples)
+
+            return {
+                "student_input_ids": student_inputs["input_ids"],
+                "student_attention_mask": student_inputs["attention_mask"],
+                "teacher_input_ids": teacher_inputs["input_ids"],
+                "teacher_attention_mask": teacher_inputs["attention_mask"],
+            }
+        else:
+            # Single example logic
+            example = examples
+            # Get audio - can be path, dict with 'array'/'sampling_rate', or numpy array
+            audio_input = example.get("audio")
+
+            # Convert numpy array to tensor if needed (but keep dict format for resampling info)
+            if isinstance(audio_input, dict):
+                # HuggingFace format with 'array' and 'sampling_rate' - keep as dict for resampling
+                if isinstance(audio_input.get("array"), np.ndarray):
+                    audio_array = torch.from_numpy(audio_input["array"]).float()
+                    audio_input = {
+                        "array": audio_array,
+                        "sampling_rate": audio_input.get("sampling_rate", 16000),
+                    }
+            elif isinstance(audio_input, np.ndarray):
+                # Convert numpy array to tensor
+                audio_input = torch.from_numpy(audio_input).float()
+
+            text = example.get("text", "")
+            lang = example.get("lang", "")
+
+            # Process for student
+            student_inputs = self.student_processor.process_example(
+                {
+                    "audio": audio_input,
+                    "text": text,
+                    "lang": lang,
+                }
+            )
+
+            # Process for teacher
+            teacher_inputs = self.teacher_processor.process_example(
+                {
+                    "audio": audio_input,
+                    "text": text,
+                    "lang": lang,
+                }
+            )
+
+            return {
+                "student_input_ids": student_inputs["input_ids"],
+                "student_attention_mask": student_inputs["attention_mask"],
+                "teacher_input_ids": teacher_inputs["input_ids"],
+                "teacher_attention_mask": teacher_inputs["attention_mask"],
+            }
+
+
 class DistillationTrainer(Trainer):
     def __init__(self, *args, teacher_model=None, temperature=2.0, alpha=0.5, **kwargs):
         super().__init__(*args, **kwargs)
@@ -113,12 +188,22 @@ class DistillationTrainer(Trainer):
                 speech_token_mask = speech_token_mask[:, -min_len:]
 
         # Compute distillation loss
-        loss, _, _ = self.distill_loss_fn(
+        loss, task_loss, distill_loss, teacher_loss = self.distill_loss_fn(
             student_logits,
             teacher_logits,
             labels,
             speech_token_mask=speech_token_mask,
         )
+
+        # Log individual losses
+        if self.state.global_step % self.args.logging_steps == 0:
+            self.log(
+                {
+                    "student_loss": task_loss.item(),
+                    "teacher_loss": teacher_loss.item(),
+                    "distill_loss": distill_loss.item(),
+                }
+            )
 
         return (loss, outputs) if return_outputs else loss
 
@@ -232,9 +317,9 @@ def train(config):
                 test_size=config.test_size, seed=42
             )
             train_dataset = split_dataset["train"]
-            eval_dataset_raw = split_dataset["test"]
+            eval_dataset = split_dataset["test"]
         else:
-            eval_dataset_raw = None
+            eval_dataset = None
 
         # Student processor (prefix can be string, dict, or callable)
         student_processor = SpeechDistillDatasetProcessor(
@@ -260,75 +345,19 @@ def train(config):
             device=device,
         )
 
-        def process_for_distillation(example):
-            """Process a single example for both student and teacher."""
-
-            # Get audio - can be path, dict with 'array'/'sampling_rate', or numpy array
-            audio_input = example.get("audio")
-
-            # Convert numpy array to tensor if needed (but keep dict format for resampling info)
-            if isinstance(audio_input, dict):
-                # HuggingFace format with 'array' and 'sampling_rate' - keep as dict for resampling
-                if isinstance(audio_input.get("array"), np.ndarray):
-                    audio_array = torch.from_numpy(audio_input["array"]).float()
-                    audio_input = {
-                        "array": audio_array,
-                        "sampling_rate": audio_input.get("sampling_rate", 16000),
-                    }
-            elif isinstance(audio_input, np.ndarray):
-                # Convert numpy array to tensor
-                audio_input = torch.from_numpy(audio_input).float()
-
-            text = example.get("text", "")
-            lang = example.get("lang", "")
-
-            # Process for student
-            student_inputs = student_processor.process_example(
-                {
-                    "audio": audio_input,
-                    "text": text,
-                    "lang": lang,
-                }
-            )
-
-            # Process for teacher
-            teacher_inputs = teacher_processor.process_example(
-                {
-                    "audio": audio_input,
-                    "text": text,
-                    "lang": lang,
-                }
-            )
-
-            return {
-                "student_input_ids": student_inputs["input_ids"],
-                "student_attention_mask": student_inputs["attention_mask"],
-                "teacher_input_ids": teacher_inputs["input_ids"],
-                "teacher_attention_mask": teacher_inputs["attention_mask"],
-            }
-
-        # Map the processing function over the dataset
-        print("Processing training dataset (this may take a while)...")
-        train_dataset = train_dataset.map(
-            process_for_distillation,
-            desc="Processing audio to speech tokens",
-            num_proc=config.num_workers,
+        # Create the picklable processor
+        distill_processor = DistillationDataProcessor(
+            student_processor, teacher_processor
         )
-
-        # Process eval dataset if it exists
-        if eval_dataset_raw is not None:
-            print("Processing evaluation dataset...")
-            eval_dataset = eval_dataset_raw.map(
-                process_for_distillation,
-                desc="Processing audio to speech tokens (eval)",
-                num_proc=config.num_workers,
-            )
-        else:
-            eval_dataset = None
 
         # Use ProcessedDataCollator for already-processed data
         data_collator = ProcessedDataCollator(tokenizer)
-        print("Using ProcessedDataCollator")
+        print("Using ProcessedDataCollator with on-the-fly processing (set_transform)")
+
+        # Apply on-the-fly transformation
+        train_dataset.set_transform(distill_processor)
+        if eval_dataset is not None:
+            eval_dataset.set_transform(distill_processor)
 
     else:
         # Use the old approach with SpeechDistillDataset and SpeechDistillDataCollator
@@ -371,6 +400,12 @@ def train(config):
         save_total_limit=3,
         remove_unused_columns=False,
         label_names=["labels"],
+        dataloader_num_workers=config.dataloader_num_workers,
+        dataloader_prefetch_factor=(
+            config.dataloader_prefetch_factor
+            if config.dataloader_num_workers > 0
+            else None
+        ),
     )
 
     # Initialize Trainer
@@ -390,6 +425,12 @@ def train(config):
 
 
 if __name__ == "__main__":
+    # Set start method to 'spawn' for CUDA compatibility with multiprocessing
+    try:
+        torch.multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
     parser = argparse.ArgumentParser(
         description="Distill a teacher LLM into a student LLM."
     )
@@ -498,6 +539,18 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of processes for dataset mapping (default: 1, set to 1 to avoid issues with speech tokenizer)",
+    )
+    parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=1,
+        help="Number of workers for data loading (on-the-fly processing)",
+    )
+    parser.add_argument(
+        "--dataloader_prefetch_factor",
+        type=int,
+        default=2,
+        help="Number of batches to prefetch per worker",
     )
     parser.add_argument(
         "--text_bos",

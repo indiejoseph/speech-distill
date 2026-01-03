@@ -99,6 +99,54 @@ def get_speech_tokens(audio_input: Union[str, np.ndarray, dict], device="cpu"):
     return codes, codes_len
 
 
+def get_speech_tokens_batch(audio_inputs: list, device="cpu"):
+    """
+    Convert a batch of audio inputs to speech tokens.
+
+    Args:
+        audio_inputs: List of audio inputs (str, np.ndarray, or dict)
+        device: Device to use for processing (default: "cpu")
+
+    Returns:
+        codes: Batch of speech token codes
+        codes_len: Batch of lengths of codes
+    """
+    global speech_tokenizer
+    if speech_tokenizer is None:
+        print("Loading speech tokenizer...")
+        speech_tokenizer = s3tokenizer.load_model("speech_tokenizer_v2_25hz").to(device)
+
+    log_mels = []
+    for audio_input in audio_inputs:
+        # Handle different input formats
+        if isinstance(audio_input, dict):
+            audio = audio_input.get("array")
+            sr = audio_input.get("sampling_rate", TARGET_SAMPLING_RATE)
+        elif isinstance(audio_input, str):
+            audio = s3tokenizer.load_audio(audio_input)
+            sr = TARGET_SAMPLING_RATE
+        else:
+            audio = audio_input
+            sr = TARGET_SAMPLING_RATE
+
+        # Resample if necessary (returns tensor)
+        audio_tensor = _resample_audio(audio, sr).to(device)
+        log_mel = s3tokenizer.log_mel_spectrogram(audio_tensor)
+        log_mels.append(log_mel)
+
+    mels, mels_lens = s3tokenizer.padding(log_mels)
+
+    # Move mel spectrogram and lengths to the correct device
+    mels = mels.to(device)
+    mels_lens = mels_lens.to(device)
+
+    codes, codes_len = speech_tokenizer.quantize(mels, mels_lens)
+    codes = codes.to(device)
+    codes_len = codes_len.to(device)
+
+    return codes, codes_len
+
+
 def prepare_inputs(
     text: str,
     audio_input: Union[str, np.ndarray],
@@ -146,5 +194,49 @@ def prepare_inputs(
 
     # Tokenize text
     text_inputs = tokenizer(text, return_tensors="pt", return_attention_mask=True)
+
+    return text_inputs
+
+
+def prepare_inputs_batch(
+    texts: list,
+    audio_inputs: list,
+    prefixes: list,
+    text_bos: str,
+    text_eos: str,
+    text_prefixes: list,
+    speech_bos: str,
+    speech_eos: str,
+    tokenizer: "AutoTokenizer",
+    device="cpu",
+):
+    """
+    Prepare a batch of model inputs with text and speech tokens.
+    """
+    codes, codes_lens = get_speech_tokens_batch(audio_inputs, device=device)
+
+    batch_texts = []
+    for i in range(len(texts)):
+        speech_tokens = "".join(
+            [
+                "<|" + str(token_id) + "|>"
+                for token_id in codes[i, : codes_lens[i]].cpu().tolist()
+            ]
+        )
+        full_text = (
+            prefixes[i]
+            + text_bos
+            + texts[i]
+            + text_eos
+            + text_prefixes[i]
+            + speech_bos
+            + speech_tokens
+            + speech_eos
+        )
+        batch_texts.append(full_text)
+
+    # Tokenize batch
+    # We don't pad here because the collator will handle it
+    text_inputs = tokenizer(batch_texts, padding=False, return_attention_mask=True)
 
     return text_inputs

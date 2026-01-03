@@ -2,7 +2,7 @@ import os
 import torch
 from typing import Union, Dict, List, Any, Optional, Callable, TYPE_CHECKING
 from datasets import load_dataset, load_from_disk
-from utils import prepare_inputs
+from utils import prepare_inputs, prepare_inputs_batch
 
 if TYPE_CHECKING:
     from transformers import AutoTokenizer
@@ -254,44 +254,31 @@ class SpeechDistillDatasetProcessor:
         Returns:
             Dict with lists of tokenized inputs
         """
-        batch_size = len(examples.get("text", examples.get("audio", [])))
+        audio_inputs = examples.get("audio", examples.get("wav_path", []))
+        texts = examples.get("text", [""] * len(audio_inputs))
+        langs = examples.get("lang", [""] * len(audio_inputs))
 
-        input_ids_list = []
-        attention_mask_list = []
+        prefixes = [self._get_prefix(t, l) for t, l in zip(texts, langs)]
+        text_prefixes = [self._get_text_prefix(t, l) for t, l in zip(texts, langs)]
 
-        for i in range(batch_size):
-            # audio_input can be:
-            # - str: file path
-            # - dict: HuggingFace format with 'array' and 'sampling_rate'
-            # - numpy.ndarray: raw audio samples
-            audio_input = examples.get("audio", examples.get("wav_path", []))[i]
+        # Convert audio to speech tokens and prepare inputs in batch
+        model_inputs = prepare_inputs_batch(
+            texts=texts,
+            audio_inputs=audio_inputs,
+            prefixes=prefixes,
+            text_bos=self.text_bos,
+            text_eos=self.text_eos,
+            text_prefixes=text_prefixes,
+            speech_bos=self.speech_bos,
+            speech_eos=self.speech_eos,
+            tokenizer=self.tokenizer,
+            device=self.device,
+        )
 
-            text = examples.get("text", [""])[i]
-            lang = examples.get("lang", [""] * batch_size)[i]
-
-            # Get prefix based on text and lang
-            prefix = self._get_prefix(text, lang)
-            text_prefix = self._get_text_prefix(text, lang)
-
-            # Convert audio to speech tokens and prepare inputs
-            model_inputs = prepare_inputs(
-                text=text,
-                audio_input=audio_input,
-                prefix=prefix,
-                text_bos=self.text_bos,
-                text_eos=self.text_eos,
-                text_prefix=text_prefix,
-                speech_bos=self.speech_bos,
-                speech_eos=self.speech_eos,
-                tokenizer=self.tokenizer,
-            )
-
-            input_ids_list.append(model_inputs["input_ids"].squeeze(0))
-            attention_mask_list.append(model_inputs["attention_mask"].squeeze(0))
-
+        # Return as lists of tensors (not padded yet)
         return {
-            "input_ids": input_ids_list,
-            "attention_mask": attention_mask_list,
+            "input_ids": [ids for ids in model_inputs["input_ids"]],
+            "attention_mask": [mask for mask in model_inputs["attention_mask"]],
         }
 
 

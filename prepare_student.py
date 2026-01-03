@@ -63,14 +63,18 @@ def expand_student_vocab(teacher_model_id, student_model_id, output_dir):
 
     # Apply noisy mean initialization to new embeddings
     num_new_tokens = len(student_tokenizer) - old_vocab_size
-    if num_new_tokens > 0:
-        print(f"Initializing {num_new_tokens} new token embeddings with noisy mean...")
-        input_embeddings = student_model.get_input_embeddings().weight
-        _noisy_mean_initialization(input_embeddings, num_new_tokens)
 
-        output_embeddings = student_model.get_output_embeddings().weight
-        _noisy_mean_initialization(output_embeddings, num_new_tokens)
-        print("New embeddings initialized successfully!")
+    with torch.no_grad():
+        if num_new_tokens > 0:
+            print(
+                f"Initializing {num_new_tokens} new token embeddings with noisy mean..."
+            )
+            input_embeddings = student_model.get_input_embeddings().weight
+            _noisy_mean_initialization(input_embeddings, num_new_tokens)
+
+            output_embeddings = student_model.get_output_embeddings().weight
+            _noisy_mean_initialization(output_embeddings, num_new_tokens)
+            print("New embeddings initialized successfully!")
 
     # Save the resized model
     student_model.save_pretrained(output_dir)
