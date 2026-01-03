@@ -535,12 +535,6 @@ if __name__ == "__main__":
     )
     parser.set_defaults(use_processor=True)
     parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=1,
-        help="Number of processes for dataset mapping (default: 1, set to 1 to avoid issues with speech tokenizer)",
-    )
-    parser.add_argument(
         "--dataloader_num_workers",
         type=int,
         default=1,
@@ -555,13 +549,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--text_bos",
         type=str,
-        default="",
+        default="<|text_start|>",
         help="Text begin-of-sequence token",
     )
     parser.add_argument(
         "--text_eos",
         type=str,
-        default="",
+        default="<|text_end|>",
         help="Text end-of-sequence token",
     )
     parser.add_argument(
@@ -573,13 +567,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--speech_bos",
         type=str,
-        default="<|speech_bos|>",
+        default="<|semantic_token_start|>",
         help="Speech begin-of-sequence token",
     )
     parser.add_argument(
         "--speech_eos",
         type=str,
-        default="<|speech_eos|>",
+        default="<|semantic_token_start|>",
         help="Speech end-of-sequence token",
     )
 
