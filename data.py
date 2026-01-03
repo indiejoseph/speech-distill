@@ -27,11 +27,37 @@ class SpeechDistillDataset:
         student_prefix: Union[str, Dict[str, str]] = "",
         test_size: float = 0.1,
         seed: int = 42,
+        max_duration: float = -1.0,
     ):
         if os.path.exists(dataset_name_or_path):
             self.dataset = load_from_disk(dataset_name_or_path)
         else:
             self.dataset = load_dataset(dataset_name_or_path)
+
+        if max_duration > 0:
+            print(f"Filtering dataset for audio duration <= {max_duration}s...")
+
+            def filter_duration(example):
+                if "duration" in example and example["duration"] is not None:
+                    return example["duration"] <= max_duration
+                audio = example.get("audio")
+                if audio is not None:
+                    if (
+                        isinstance(audio, dict)
+                        and "array" in audio
+                        and "sampling_rate" in audio
+                    ):
+                        duration = len(audio["array"]) / audio["sampling_rate"]
+                        return duration <= max_duration
+                return True
+
+            if hasattr(self.dataset, "filter"):
+                self.dataset = self.dataset.filter(filter_duration)
+            elif isinstance(self.dataset, dict):
+                for k in self.dataset.keys():
+                    if hasattr(self.dataset[k], "filter"):
+                        self.dataset[k] = self.dataset[k].filter(filter_duration)
+
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.teacher_prefix = teacher_prefix

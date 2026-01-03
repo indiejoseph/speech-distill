@@ -290,6 +290,35 @@ def train(config):
     print(f"Dataset loaded: {len(train_dataset)} examples")
     print(f"Dataset columns: {train_dataset.column_names}")
 
+    # Filter by audio duration if requested
+    if config.max_duration > 0:
+        print(f"Filtering dataset for audio duration <= {config.max_duration}s...")
+
+        def filter_duration(example):
+            # Check for explicit duration column first
+            if "duration" in example and example["duration"] is not None:
+                return example["duration"] <= config.max_duration
+
+            # Otherwise calculate from audio array
+            audio = example.get("audio")
+            if audio is not None:
+                if (
+                    isinstance(audio, dict)
+                    and "array" in audio
+                    and "sampling_rate" in audio
+                ):
+                    # Handle case where array might be a list or numpy array
+                    array_len = len(audio["array"])
+                    sampling_rate = audio["sampling_rate"]
+                    if sampling_rate > 0:
+                        duration = array_len / sampling_rate
+                        return duration <= config.max_duration
+            # If no audio or duration info, keep it
+            return True
+
+        train_dataset = train_dataset.filter(filter_duration)
+        print(f"Dataset size after filtering: {len(train_dataset)}")
+
     # Process dataset with SpeechDistillDatasetProcessor
     # Create separate processors for student and teacher with different prefixes
     if config.use_processor:
@@ -362,6 +391,7 @@ def train(config):
             teacher_prefix=teacher_prefix,
             student_prefix=student_prefix,
             test_size=config.test_size,
+            max_duration=config.max_duration,
         )
         train_dataset = dataset_wrapper.get_split("train")
         eval_dataset = dataset_wrapper.get_split("test")
@@ -485,6 +515,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--max_length", type=int, default=512, help="Max sequence length"
+    )
+    parser.add_argument(
+        "--max_duration",
+        type=float,
+        default=10.0,
+        help="Max audio duration in seconds (default: 10.0)",
     )
     parser.add_argument(
         "--teacher_prefix",
