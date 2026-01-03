@@ -19,60 +19,48 @@ class DistillationLoss(nn.Module):
         speech_token_mask: [batch_size, seq_len] - binary mask where 1 = speech token positions
                           If None, use entire sequence. If provided, only compute loss on speech tokens.
         """
-        # Shift logits and labels for causal LM: logits[i] predicts labels[i+1]
-        shift_student_logits = student_logits[..., :-1, :].contiguous()
-        shift_teacher_logits = teacher_logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
-
-        if speech_token_mask is not None:
-            # shift_mask[i] == 1 means shift_labels[i] (which is labels[i+1]) is a speech token
-            shift_mask = speech_token_mask[..., 1:].contiguous()
-            mask_flat = shift_mask.view(-1).bool()
-
-            # Apply mask to shifted logits and labels
-            student_logits_masked = shift_student_logits.view(
-                -1, shift_student_logits.size(-1)
-            )[mask_flat]
-            teacher_logits_masked = shift_teacher_logits.view(
-                -1, shift_teacher_logits.size(-1)
-            )[mask_flat]
-            labels_masked = shift_labels.view(-1)[mask_flat]
-        else:
-            # Use entire sequence (shifted)
-            student_logits_masked = shift_student_logits.view(
-                -1, shift_student_logits.size(-1)
-            )
-            teacher_logits_masked = shift_teacher_logits.view(
-                -1, shift_teacher_logits.size(-1)
-            )
-            labels_masked = shift_labels.view(-1)
-
-        # Soften logits with temperature
-        soft_teacher_probs = F.softmax(teacher_logits_masked / self.temperature, dim=-1)
-        soft_student_log_probs = F.log_softmax(
-            student_logits_masked / self.temperature, dim=-1
+        # Causal shift: logits[i] predicts labels[i+1]
+        shift_student = (
+            student_logits[..., :-1, :].contiguous().view(-1, student_logits.size(-1))
         )
+        shift_teacher = (
+            teacher_logits[..., :-1, :]
+            .contiguous()
+            .view(-1, teacher_logits.size(-1))
+            .detach()
+        )
+        shift_labels = labels[..., 1:].contiguous().view(-1)
 
-        # KL Divergence loss
-        if student_logits_masked.size(0) > 0:
-            distill_loss = self.kl_div(soft_student_log_probs, soft_teacher_probs) * (
-                self.temperature**2
+        # Create a combined mask: Speech mask AND not padding (-100)
+        if speech_token_mask is not None:
+            shift_mask = speech_token_mask[..., 1:].contiguous().view(-1).bool()
+            valid_mask = shift_mask & (shift_labels != -100)
+        else:
+            valid_mask = shift_labels != -100
+
+        # Filter everything once
+        s_logits = shift_student[valid_mask]
+        t_logits = shift_teacher[valid_mask]
+        l_masked = shift_labels[valid_mask]
+
+        if s_logits.size(0) == 0:
+            return (
+                torch.tensor(0.0, device=student_logits.device),
+                torch.tensor(0.0, device=student_logits.device),
+                torch.tensor(0.0, device=student_logits.device),
+                torch.tensor(0.0, device=student_logits.device),
             )
-        else:
-            distill_loss = torch.tensor(0.0).to(student_logits.device)
 
-        # Standard Cross Entropy loss
-        # Filter out padding/ignored tokens (labels == -100)
-        ce_mask = labels_masked != -100
-        if ce_mask.sum() > 0:
-            student_logits_ce = student_logits_masked[ce_mask]
-            teacher_logits_ce = teacher_logits_masked[ce_mask]
-            labels_ce = labels_masked[ce_mask]
-            task_loss = F.cross_entropy(student_logits_ce, labels_ce)
-            teacher_task_loss = F.cross_entropy(teacher_logits_ce, labels_ce)
-        else:
-            task_loss = torch.tensor(0.0).to(student_logits.device)
-            teacher_task_loss = torch.tensor(0.0).to(student_logits.device)
+        # Distillation Loss (KL Divergence)
+        soft_t = F.softmax(t_logits / self.temperature, dim=-1)
+        log_soft_s = F.log_softmax(s_logits / self.temperature, dim=-1)
+        distill_loss = self.kl_div(log_soft_s, soft_t) * (self.temperature**2)
+
+        # Task Loss (Standard Cross Entropy)
+        task_loss = F.cross_entropy(s_logits, l_masked)
+
+        # Teacher Performance Monitoring (no gradients needed as t_logits is detached)
+        teacher_task_loss = F.cross_entropy(t_logits, l_masked)
 
         # Combined loss
         total_loss = self.alpha * task_loss + (1 - self.alpha) * distill_loss

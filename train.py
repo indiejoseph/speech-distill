@@ -316,7 +316,7 @@ def train(config):
             # If no audio or duration info, keep it
             return True
 
-        train_dataset = train_dataset.filter(filter_duration)
+        train_dataset = train_dataset.filter(filter_duration, num_proc=16)
         print(f"Dataset size after filtering: {len(train_dataset)}")
 
     # Process dataset with SpeechDistillDatasetProcessor
