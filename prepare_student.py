@@ -29,52 +29,75 @@ def expand_student_vocab(teacher_model_id, student_model_id, output_dir):
     )
 
     print(f"Loading student tokenizer: {student_model_id}")
-    student_tokenizer = AutoTokenizer.from_pretrained(
+    student_tokenizer_old = AutoTokenizer.from_pretrained(
         student_model_id, trust_remote_code=True
     )
 
-    # Get vocab sets
-    teacher_vocab = teacher_tokenizer.get_vocab()
-    student_vocab = student_tokenizer.get_vocab()
+    # We will use the teacher's tokenizer as the new student tokenizer
+    # to ensure perfect ID alignment.
+    print("Using teacher tokenizer as the new student tokenizer...")
+    new_student_tokenizer = teacher_tokenizer
+    new_student_tokenizer.save_pretrained(output_dir)
 
-    # Find missing tokens
-    missing_tokens = [token for token in teacher_vocab if token not in student_vocab]
-    print(f"Found {len(missing_tokens)} missing tokens in student vocab.")
-
-    if len(missing_tokens) > 0:
-        print("Adding missing tokens to student tokenizer...")
-        student_tokenizer.add_tokens(missing_tokens)
-
-    # Save the expanded tokenizer
-    student_tokenizer.save_pretrained(output_dir)
-    print(f"Expanded tokenizer saved to {output_dir}")
-
-    # Load student model and resize embeddings
+    # Load student model
     print(f"Loading student model: {student_model_id}")
     student_model = AutoModelForCausalLM.from_pretrained(
         student_model_id, torch_dtype=torch.bfloat16, trust_remote_code=True
     )
 
     old_vocab_size = student_model.config.vocab_size
+    new_vocab_size = len(new_student_tokenizer)
+
     print(
-        f"Resizing student model embeddings from {old_vocab_size} to {len(student_tokenizer)}"
+        f"Resizing student model embeddings from {old_vocab_size} to {new_vocab_size}"
     )
-    student_model.resize_token_embeddings(len(student_tokenizer))
 
-    # Apply noisy mean initialization to new embeddings
-    num_new_tokens = len(student_tokenizer) - old_vocab_size
+    # Get old embeddings
+    old_input_embeds = student_model.get_input_embeddings().weight.detach()
+    old_output_embeds = student_model.get_output_embeddings().weight.detach()
+    embedding_dim = old_input_embeds.size(1)
 
-    with torch.no_grad():
-        if num_new_tokens > 0:
-            print(
-                f"Initializing {num_new_tokens} new token embeddings with noisy mean..."
-            )
-            input_embeddings = student_model.get_input_embeddings().weight
-            _noisy_mean_initialization(input_embeddings, num_new_tokens)
+    # Create new embedding matrices
+    new_input_embeds = torch.zeros(
+        (new_vocab_size, embedding_dim), dtype=old_input_embeds.dtype
+    )
+    new_output_embeds = torch.zeros(
+        (new_vocab_size, embedding_dim), dtype=old_output_embeds.dtype
+    )
 
-            output_embeddings = student_model.get_output_embeddings().weight
-            _noisy_mean_initialization(output_embeddings, num_new_tokens)
-            print("New embeddings initialized successfully!")
+    # Initialize with noisy mean (for tokens we don't find in the old vocab)
+    avg_input = old_input_embeds.mean(dim=0, keepdim=True)
+    avg_output = old_output_embeds.mean(dim=0, keepdim=True)
+
+    # Fill with noisy mean first
+    new_input_embeds.normal_(mean=0, std=(1.0 / math.sqrt(embedding_dim)))
+    new_input_embeds += avg_input
+    new_output_embeds.normal_(mean=0, std=(1.0 / math.sqrt(embedding_dim)))
+    new_output_embeds += avg_output
+
+    # Map old embeddings to new indices
+    print("Mapping old embeddings to new indices...")
+    old_vocab = student_tokenizer_old.get_vocab()
+    new_vocab = new_student_tokenizer.get_vocab()
+
+    matched_count = 0
+    for token, new_idx in new_vocab.items():
+        if token in old_vocab:
+            old_idx = old_vocab[token]
+            if old_idx < old_vocab_size:
+                new_input_embeds[new_idx] = old_input_embeds[old_idx]
+                new_output_embeds[new_idx] = old_output_embeds[old_idx]
+                matched_count += 1
+
+    print(
+        f"Matched and preserved {matched_count} tokens from the original student model."
+    )
+
+    # Update model with new embeddings
+    student_model.resize_token_embeddings(new_vocab_size)
+    student_model.get_input_embeddings().weight.data = new_input_embeds
+    student_model.get_output_embeddings().weight.data = new_output_embeds
+    student_model.config.vocab_size = new_vocab_size
 
     # Save the resized model
     student_model.save_pretrained(output_dir)

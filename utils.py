@@ -184,7 +184,7 @@ def prepare_inputs(
     text = (
         prefix
         + text_bos
-        + text
+        + text.strip()
         + text_eos
         + text_prefix
         + speech_bos
