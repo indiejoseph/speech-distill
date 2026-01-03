@@ -242,6 +242,7 @@ def train(config):
                 "up_proj",
                 "down_proj",
             ],
+            modules_to_save=["embed_tokens", "lm_head"],
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM",
