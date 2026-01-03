@@ -157,11 +157,6 @@ python train.py \
 ├── distillation_loss.py        # KL divergence distillation loss
 ├── prepare_student.py          # Student vocab alignment
 ├── utils.py                    # Audio processing utilities
-├── prefix_functions.py         # Example prefix functions
-├── example_usage.py            # Usage examples
-├── PREFIX_GUIDE.md            # Detailed prefix configuration guide
-├── dataset.ipynb              # Dataset testing notebook
-├── forward.ipynb              # Forward pass testing notebook
 └── requirements.txt           # Python dependencies
 ```
 
