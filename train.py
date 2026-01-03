@@ -410,8 +410,8 @@ def train(config):
         gradient_accumulation_steps=4,
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
+        warmup_steps=config.warmup_steps,
         logging_steps=10,
-        save_steps=100,
         bf16=config.bf16,
         gradient_checkpointing=config.gradient_checkpointing,
         eval_strategy="epoch",
@@ -567,6 +567,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--num_train_epochs", type=int, default=3, help="Number of training epochs"
+    )
+    parser.add_argument(
+        "--warmup_steps", type=int, default=1000, help="Number of warmup steps"
     )
     parser.add_argument(
         "--bf16",
