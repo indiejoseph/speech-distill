@@ -573,7 +573,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--speech_eos",
         type=str,
-        default="<|semantic_token_start|>",
+        default="<|semantic_token_end|>",
         help="Speech end-of-sequence token",
     )
 
