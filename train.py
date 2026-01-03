@@ -171,9 +171,17 @@ def train(config):
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM",
+            use_rslora=config.use_rslora,
+            init_lora_weights=config.init_lora_weights,
         )
         student_model = get_peft_model(student_model, lora_config)
         student_model.print_trainable_parameters()
+
+    if config.gradient_checkpointing:
+        print("Enabling gradient checkpointing...")
+        student_model.gradient_checkpointing_enable()
+        # Required for gradient checkpointing when using PEFT
+        student_model.enable_input_require_grads()
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(student_path, trust_remote_code=True)
@@ -347,19 +355,20 @@ def train(config):
 
     # Training arguments
     training_args = TrainingArguments(
-        output_dir="./distilled_model",
+        output_dir=config.output_dir,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=4,
-        learning_rate=5e-5,
-        num_train_epochs=3,
+        learning_rate=config.learning_rate,
+        num_train_epochs=config.num_train_epochs,
         logging_steps=10,
         save_steps=100,
-        bf16=True,
-        eval_strategy="steps",
-        eval_steps=50,
-        save_strategy="steps",
+        bf16=config.bf16,
+        gradient_checkpointing=config.gradient_checkpointing,
+        eval_strategy="epoch",
+        save_strategy="epoch",
         load_best_model_at_end=True,
-        report_to="none",
+        report_to=config.report_to,
+        save_total_limit=3,
         remove_unused_columns=False,
         label_names=["labels"],
     )
@@ -400,6 +409,12 @@ if __name__ == "__main__":
         "--dataset_path", type=str, required=True, help="Path to the dataset"
     )
     parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./distilled_model",
+        help="Output directory for the distilled model",
+    )
+    parser.add_argument(
         "--max_length", type=int, default=512, help="Max sequence length"
     )
     parser.add_argument(
@@ -422,6 +437,18 @@ if __name__ == "__main__":
     parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
     parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
     parser.add_argument(
+        "--use_rslora",
+        action="store_true",
+        help="Whether to use Rank-Stabilized LoRA",
+    )
+    parser.set_defaults(use_rslora=True)
+    parser.add_argument(
+        "--init_lora_weights",
+        type=str,
+        default="pissa",
+        help="LoRA weight initialization method (e.g., 'pissa', 'gaussian', 'default')",
+    )
+    parser.add_argument(
         "--temperature", type=float, default=2.0, help="Distillation temperature"
     )
     parser.add_argument(
@@ -431,16 +458,41 @@ if __name__ == "__main__":
         help="Weight for task loss vs distillation loss",
     )
     parser.add_argument(
+        "--learning_rate", type=float, default=5e-5, help="Learning rate"
+    )
+    parser.add_argument(
+        "--num_train_epochs", type=int, default=3, help="Number of training epochs"
+    )
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Whether to use bf16 (default: True)",
+    )
+    parser.set_defaults(bf16=True)
+    parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Whether to use gradient checkpointing",
+    )
+    parser.set_defaults(gradient_checkpointing=True)
+    parser.add_argument(
         "--test_size",
         type=int,
         default=10,
         help="Number of samples for test split (default: 10)",
     )
     parser.add_argument(
+        "--report_to",
+        type=str,
+        default="wandb",
+        help="Reporting platform for Trainer (e.g., 'wandb', 'tensorboard', 'none')",
+    )
+    parser.add_argument(
         "--use_processor",
         action="store_true",
         help="Use SpeechDistillDatasetProcessor to convert audio to speech tokens on-the-fly",
     )
+    parser.set_defaults(use_processor=True)
     parser.add_argument(
         "--num_workers",
         type=int,

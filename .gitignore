@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 *.ipynb
 tmp
-distilled_models/*
+distilled_model
 pretrained_models/*
+wandb
