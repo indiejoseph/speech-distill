@@ -226,7 +226,7 @@ def prepare_inputs_batch(
         full_text = (
             prefixes[i]
             + text_bos
-            + texts[i]
+            + texts[i].strip()
             + text_eos
             + text_prefixes[i]
             + speech_bos

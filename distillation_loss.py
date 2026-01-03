@@ -54,9 +54,12 @@ class DistillationLoss(nn.Module):
         )
 
         # KL Divergence loss
-        distill_loss = self.kl_div(soft_student_log_probs, soft_teacher_probs) * (
-            self.temperature**2
-        )
+        if student_logits_masked.size(0) > 0:
+            distill_loss = self.kl_div(soft_student_log_probs, soft_teacher_probs) * (
+                self.temperature**2
+            )
+        else:
+            distill_loss = torch.tensor(0.0).to(student_logits.device)
 
         # Standard Cross Entropy loss
         # Filter out padding/ignored tokens (labels == -100)

@@ -292,9 +292,11 @@ class ProcessedDataCollator:
         self,
         tokenizer: "AutoTokenizer",
         pad_to_multiple_of: Optional[int] = None,
+        speech_bos: str = "<|speech_bos|>",
     ):
         self.tokenizer = tokenizer
         self.pad_to_multiple_of = pad_to_multiple_of
+        self.speech_bos = speech_bos
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         # Separate student and teacher inputs if they exist
@@ -406,7 +408,7 @@ class ProcessedDataCollator:
         self, input_ids: torch.Tensor
     ) -> Optional[torch.Tensor]:
         """
-        Create a mask marking positions from <|semantic|> or <|speech_bos|> onwards.
+        Create a mask marking positions from self.speech_bos onwards.
         This is used to focus KL divergence loss on speech token prediction only.
 
         Args:
@@ -417,7 +419,13 @@ class ProcessedDataCollator:
         """
         try:
             # Try to find speech_bos token ID
-            speech_bos_candidates = ["<|semantic|>", "<|speech_bos|>", "<|speech|>"]
+            speech_bos_candidates = [
+                self.speech_bos,
+                "<|semantic|>",
+                "<|speech_bos|>",
+                "<|speech|>",
+                "<|semantic_token_start|>",
+            ]
             speech_bos_token_id = None
 
             for candidate in speech_bos_candidates:

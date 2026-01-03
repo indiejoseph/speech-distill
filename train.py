@@ -176,17 +176,6 @@ class DistillationTrainer(Trainer):
                 teacher_outputs = self.teacher_model(**inputs)
             teacher_logits = teacher_outputs.logits
 
-        # Align logits if they have different sequence lengths (due to different prefixes)
-        # Since we use right-alignment (content at the end), we take the last min_len tokens.
-        if student_logits.shape[1] != teacher_logits.shape[1]:
-            min_len = min(student_logits.shape[1], teacher_logits.shape[1])
-            student_logits = student_logits[:, -min_len:, :]
-            teacher_logits = teacher_logits[:, -min_len:, :]
-            if labels is not None:
-                labels = labels[:, -min_len:]
-            if speech_token_mask is not None:
-                speech_token_mask = speech_token_mask[:, -min_len:]
-
         # Compute distillation loss
         loss, task_loss, distill_loss, teacher_loss = self.distill_loss_fn(
             student_logits,
@@ -351,8 +340,10 @@ def train(config):
         )
 
         # Use ProcessedDataCollator for already-processed data
-        data_collator = ProcessedDataCollator(tokenizer)
-        print("Using ProcessedDataCollator with on-the-fly processing (set_transform)")
+        data_collator = ProcessedDataCollator(tokenizer, speech_bos=config.speech_bos)
+        print(
+            f"Using ProcessedDataCollator with on-the-fly processing (set_transform), speech_bos={config.speech_bos}"
+        )
 
         # Apply on-the-fly transformation
         train_dataset.set_transform(distill_processor)
@@ -420,6 +411,43 @@ def train(config):
         temperature=config.temperature,
         alpha=config.alpha,
     )
+
+    # Print a sample to verify processing
+    print("\n" + "=" * 50)
+    print("SAMPLE DATA PREVIEW")
+    print("=" * 50)
+    sample = train_dataset[0]
+
+    if "student_input_ids" in sample:
+        s_ids = sample["student_input_ids"]
+        t_ids = sample["teacher_input_ids"]
+
+        # Convert to list if they are tensors
+        if torch.is_tensor(s_ids):
+            s_ids = s_ids.tolist()
+        if torch.is_tensor(t_ids):
+            t_ids = t_ids.tolist()
+
+        print(f"\n--- STUDENT INPUT (First 100 and Last 10 tokens) ---")
+        print(
+            f"Text: {tokenizer.decode(s_ids[:100])} ... {tokenizer.decode(s_ids[-10:])}"
+        )
+        print(f"IDs: {s_ids[:20]} ... {s_ids[-10:]}")
+
+        print(f"\n--- TEACHER INPUT (First 100 and Last 10 tokens) ---")
+        print(
+            f"Text: {tokenizer.decode(t_ids[:100])} ... {tokenizer.decode(t_ids[-10:])}"
+        )
+        print(f"IDs: {t_ids[:20]} ... {t_ids[-10:]}")
+    else:
+        # Legacy format
+        ids = sample["input_ids"]
+        if torch.is_tensor(ids):
+            ids = ids.tolist()
+        print(f"\n--- INPUT (First 100 and Last 10 tokens) ---")
+        print(f"Text: {tokenizer.decode(ids[:100])} ... {tokenizer.decode(ids[-10:])}")
+        print(f"IDs: {ids[:20]} ... {ids[-10:]}")
+    print("=" * 50 + "\n")
 
     trainer.train()
 
