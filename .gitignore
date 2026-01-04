@@ -6,3 +6,4 @@ tmp
 distilled_model
 pretrained_models/*
 wandb
+.venv

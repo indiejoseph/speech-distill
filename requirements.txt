@@ -12,3 +12,6 @@ onnxruntime
 onnxruntime-gpu
 einops
 wandb
+peft
+bitsandbytes
+datasets==2.21.0

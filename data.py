@@ -1,177 +1,63 @@
-import os
+import json
 import torch
+import numpy as np
 from typing import Union, Dict, List, Any, Optional, Callable, TYPE_CHECKING
-from datasets import load_dataset, load_from_disk
 from utils import prepare_inputs, prepare_inputs_batch
 
 if TYPE_CHECKING:
     from transformers import AutoTokenizer
-    from datasets import DatasetDict, Dataset, IterableDatasetDict, IterableDataset
 
 
-class SpeechDistillDataset:
-    dataset: Union[
-        "DatasetDict",
-        "Dataset",
-        "IterableDatasetDict",
-        "IterableDataset",
-        Dict[str, Any],
-    ]
-
-    def __init__(
-        self,
-        dataset_name_or_path: str,
-        tokenizer: "AutoTokenizer",
-        max_length: int = 512,
-        teacher_prefix: Union[str, Dict[str, str]] = "",
-        student_prefix: Union[str, Dict[str, str]] = "",
-        test_size: float = 0.1,
-        seed: int = 42,
-        max_duration: float = -1.0,
-    ):
-        if os.path.exists(dataset_name_or_path):
-            self.dataset = load_from_disk(dataset_name_or_path)
-        else:
-            self.dataset = load_dataset(dataset_name_or_path)
-
-        if max_duration > 0:
-            print(f"Filtering dataset for audio duration <= {max_duration}s...")
-
-            def filter_duration(example):
-                if "duration" in example and example["duration"] is not None:
-                    return example["duration"] <= max_duration
-                audio = example.get("audio")
-                if audio is not None:
-                    if (
-                        isinstance(audio, dict)
-                        and "array" in audio
-                        and "sampling_rate" in audio
-                    ):
-                        duration = len(audio["array"]) / audio["sampling_rate"]
-                        return duration <= max_duration
-                return True
-
-            if hasattr(self.dataset, "filter"):
-                self.dataset = self.dataset.filter(filter_duration)
-            elif isinstance(self.dataset, dict):
-                for k in self.dataset.keys():
-                    if hasattr(self.dataset[k], "filter"):
-                        self.dataset[k] = self.dataset[k].filter(filter_duration)
-
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.teacher_prefix = teacher_prefix
-        self.student_prefix = student_prefix
-
-        # Check if dataset has splits
-        if hasattr(self.dataset, "keys"):
-            # Dataset already has splits
-            self.has_splits = True
-        else:
-            # No splits, create train/test split
-            self.has_splits = False
-            self.test_size = test_size
-            self.seed = seed
-            self._create_splits()
-
-    def _create_splits(self):
-        """Create train/test splits if they don't exist."""
-        from datasets import Dataset
-
-        if isinstance(self.dataset, Dataset):
-            splits = self.dataset.train_test_split(
-                test_size=self.test_size,
-                seed=self.seed,
-            )
-
-            self.dataset = {
-                "train": splits["train"],
-                "test": splits["test"],
-            }
-            self.has_splits = True
-        else:
-            raise ValueError(
-                f"Cannot create splits for dataset type {type(self.dataset)}. "
-                "train_test_split is only available for Dataset objects."
-            )
-
-    def get_split(self, split: str = "train") -> Any:
-        if self.has_splits:
-            return self.dataset[split]
-        else:
-            # Should not reach here after __init__, but handle anyway
-            return self.dataset
+def parse_prefix(prefix_str):
+    if not prefix_str:
+        return ""
+    try:
+        return json.loads(prefix_str)
+    except json.JSONDecodeError:
+        return prefix_str
 
 
-class SpeechDistillDataCollator:
-    def __init__(
-        self,
-        tokenizer: "AutoTokenizer",
-        max_length: int = 512,
-        teacher_prefix: Union[str, Dict[str, str]] = "",
-        student_prefix: Union[str, Dict[str, str]] = "",
-    ):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.teacher_prefix = teacher_prefix
-        self.student_prefix = student_prefix
+def align_prefixes(teacher_prefix, student_prefix, tokenizer):
+    """
+    Align teacher and student prefixes by left-padding the shorter one with pad_token.
+    Ensures both prefixes have the same number of tokens.
+    """
+    pad_token = tokenizer.pad_token if tokenizer.pad_token else tokenizer.eos_token
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        # features is a list of dicts with ['audio', 'lang', 'text', 'speech_tokens']
+    def _align_single(t_p, s_p):
+        t_ids = tokenizer.encode(t_p, add_special_tokens=False)
+        s_ids = tokenizer.encode(s_p, add_special_tokens=False)
 
-        teacher_texts = []
-        student_texts = []
-        for f in features:
-            lang = f["lang"]
-            lang_tag = f"[{lang.upper()}]"
-            speech_tokens_str = " ".join([str(t) for t in f["speech_tokens"]])
-            content = f"{lang_tag} {speech_tokens_str} {f['text']}"
+        if len(t_ids) == len(s_ids):
+            return t_p, s_p
 
-            # Handle teacher prefix (str or dict)
-            t_prefix = self.teacher_prefix
-            if isinstance(t_prefix, dict):
-                t_prefix = t_prefix.get(lang, t_prefix.get("default", ""))
+        max_len = max(len(t_ids), len(s_ids))
 
-            # Handle student prefix (str or dict)
-            s_prefix = self.student_prefix
-            if isinstance(s_prefix, dict):
-                s_prefix = s_prefix.get(lang, s_prefix.get("default", ""))
+        if len(t_ids) < max_len:
+            t_p = (pad_token * (max_len - len(t_ids))) + t_p
+        if len(s_ids) < max_len:
+            s_p = (pad_token * (max_len - len(s_ids))) + s_p
 
-            teacher_texts.append(t_prefix + content)
-            student_texts.append(s_prefix + content)
+        return t_p, s_p
 
-        # Tokenize student inputs
-        student_batch = self.tokenizer(
-            student_texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
+    if isinstance(teacher_prefix, dict) or isinstance(student_prefix, dict):
+        # Handle dict case (per-language prefixes)
+        if isinstance(teacher_prefix, str):
+            teacher_prefix = {"default": teacher_prefix}
+        if isinstance(student_prefix, str):
+            student_prefix = {"default": student_prefix}
 
-        # Tokenize teacher inputs
-        teacher_batch = self.tokenizer(
-            teacher_texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
-
-        # For CausalLM, labels are usually the same as input_ids
-        student_batch["labels"] = student_batch["input_ids"].clone()
-
-        # Mask padding tokens in labels
-        if self.tokenizer.pad_token_id is not None:
-            student_batch["labels"][
-                student_batch["labels"] == self.tokenizer.pad_token_id
-            ] = -100
-
-        # Add teacher inputs to the batch
-        student_batch["teacher_input_ids"] = teacher_batch["input_ids"]
-        student_batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
-
-        return student_batch
+        all_keys = set(teacher_prefix.keys()) | set(student_prefix.keys())
+        new_t = {}
+        new_s = {}
+        for k in all_keys:
+            t_val = teacher_prefix.get(k, teacher_prefix.get("default", ""))
+            s_val = student_prefix.get(k, student_prefix.get("default", ""))
+            new_t[k], new_s[k] = _align_single(t_val, s_val)
+        return new_t, new_s
+    else:
+        # Handle string case
+        return _align_single(teacher_prefix, student_prefix)
 
 
 class SpeechDistillDatasetProcessor:
@@ -317,10 +203,12 @@ class ProcessedDataCollator:
     def __init__(
         self,
         tokenizer: "AutoTokenizer",
+        pad_token_id=153478,  # <|semantic_token_end|>
+        speech_bos: str = "<|semantic_token_start|>",
         pad_to_multiple_of: Optional[int] = None,
-        speech_bos: str = "<|speech_bos|>",
     ):
         self.tokenizer = tokenizer
+        self.pad_token_id = pad_token_id
         self.pad_to_multiple_of = pad_to_multiple_of
         self.speech_bos = speech_bos
 
@@ -349,32 +237,30 @@ class ProcessedDataCollator:
             student_attention_mask = [f["attention_mask"] for f in features]
 
         # Pad student inputs
-        student_batch = self._pad_sequences(student_input_ids, student_attention_mask)
+        batch = self._pad_sequences(student_input_ids, student_attention_mask)
 
         # Create labels (same as input_ids for causal LM)
-        student_batch["labels"] = student_batch["input_ids"].clone()
+        batch["labels"] = batch["input_ids"].clone()
 
         # Mask padding tokens in labels
-        if self.tokenizer.pad_token_id is not None:
-            student_batch["labels"][
-                student_batch["labels"] == self.tokenizer.pad_token_id
-            ] = -100
+        if self.pad_token_id is not None:
+            batch["labels"][batch["labels"] == self.pad_token_id] = -100
 
         # Add teacher inputs if they exist
         if teacher_input_ids and teacher_input_ids[0] is not None:
             teacher_batch = self._pad_sequences(
                 teacher_input_ids, teacher_attention_mask
             )
-            student_batch["teacher_input_ids"] = teacher_batch["input_ids"]
-            student_batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
+            batch["teacher_input_ids"] = teacher_batch["input_ids"]
+            batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
 
         # Create speech token mask (mark positions from <|speech_bos|> onwards)
         # This helps focus KL divergence on speech token prediction only
-        speech_token_mask = self._create_speech_token_mask(student_batch["input_ids"])
+        speech_token_mask = self._create_speech_token_mask(batch["input_ids"])
         if speech_token_mask is not None:
-            student_batch["speech_token_mask"] = speech_token_mask
+            batch["speech_token_mask"] = speech_token_mask
 
-        return student_batch
+        return batch
 
     def _pad_sequences(self, input_ids_list, attention_mask_list):
         """Pad sequences to the same length."""
@@ -391,12 +277,6 @@ class ProcessedDataCollator:
         batch_input_ids = []
         batch_attention_mask = []
 
-        pad_token_id = (
-            self.tokenizer.pad_token_id
-            if self.tokenizer.pad_token_id is not None
-            else 0
-        )
-
         for input_ids, attention_mask in zip(input_ids_list, attention_mask_list):
             # Convert to tensor if they're lists
             if isinstance(input_ids, list):
@@ -410,7 +290,9 @@ class ProcessedDataCollator:
             padded_input_ids = torch.cat(
                 [
                     input_ids,
-                    torch.full((padding_length,), pad_token_id, dtype=input_ids.dtype),
+                    torch.full(
+                        (padding_length,), self.pad_token_id, dtype=input_ids.dtype
+                    ),
                 ]
             )
 
@@ -489,6 +371,76 @@ class ProcessedDataCollator:
             return None
 
 
-def get_dataloader_info() -> None:
-    print("Dataset columns: ['audio', 'lang', 'text', 'speech_tokens']")
-    print("Supported languages: 'en', 'yue', 'zh'")
+class DistillationDataProcessor:
+    """
+    Picklable wrapper for dataset transformation.
+    """
+
+    def __init__(self, student_processor, teacher_processor):
+        self.student_processor = student_processor
+        self.teacher_processor = teacher_processor
+
+    def __call__(self, examples):
+        """Process examples for both student and teacher."""
+        # Check if we are receiving a batch or a single example
+        # In HF datasets, if batched=True, examples is a dict of lists
+        is_batched = isinstance(examples.get("text", examples.get("audio")), list)
+
+        if is_batched:
+            # Process for student
+            student_inputs = self.student_processor.process_batch(examples)
+            # Process for teacher
+            teacher_inputs = self.teacher_processor.process_batch(examples)
+
+            return {
+                "student_input_ids": student_inputs["input_ids"],
+                "student_attention_mask": student_inputs["attention_mask"],
+                "teacher_input_ids": teacher_inputs["input_ids"],
+                "teacher_attention_mask": teacher_inputs["attention_mask"],
+            }
+        else:
+            # Single example logic
+            example = examples
+            # Get audio - can be path, dict with 'array'/'sampling_rate', or numpy array
+            audio_input = example.get("audio")
+
+            # Convert numpy array to tensor if needed (but keep dict format for resampling info)
+            if isinstance(audio_input, dict):
+                # HuggingFace format with 'array' and 'sampling_rate' - keep as dict for resampling
+                if isinstance(audio_input.get("array"), np.ndarray):
+                    audio_array = torch.from_numpy(audio_input["array"]).float()
+                    audio_input = {
+                        "array": audio_array,
+                        "sampling_rate": audio_input.get("sampling_rate", 16000),
+                    }
+            elif isinstance(audio_input, np.ndarray):
+                # Convert numpy array to tensor
+                audio_input = torch.from_numpy(audio_input).float()
+
+            text = example.get("text", "")
+            lang = example.get("lang", "")
+
+            # Process for student
+            student_inputs = self.student_processor.process_example(
+                {
+                    "audio": audio_input,
+                    "text": text,
+                    "lang": lang,
+                }
+            )
+
+            # Process for teacher
+            teacher_inputs = self.teacher_processor.process_example(
+                {
+                    "audio": audio_input,
+                    "text": text,
+                    "lang": lang,
+                }
+            )
+
+            return {
+                "student_input_ids": student_inputs["input_ids"],
+                "student_attention_mask": student_inputs["attention_mask"],
+                "teacher_input_ids": teacher_inputs["input_ids"],
+                "teacher_attention_mask": teacher_inputs["attention_mask"],
+            }
