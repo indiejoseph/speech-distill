@@ -236,7 +236,11 @@ def train(config):
     distill_processor = DistillationDataProcessor(student_processor, teacher_processor)
 
     # Use ProcessedDataCollator for already-processed data
-    data_collator = ProcessedDataCollator(tokenizer, speech_bos=config.speech_bos)
+    data_collator = ProcessedDataCollator(
+        tokenizer,
+        speech_bos=config.speech_bos,
+        pad_token_id=153478,  # <|semantic_token_end|>
+    )
     print(
         f"Using ProcessedDataCollator with on-the-fly processing (set_transform), speech_bos={config.speech_bos}"
     )
@@ -382,8 +386,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use PEFT LoRA for student training",
     )
-    parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
-    parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
+    parser.add_argument("--lora_r", type=int, default=32, help="LoRA rank")
+    parser.add_argument("--lora_alpha", type=int, default=64, help="LoRA alpha")
     parser.add_argument(
         "--use_rslora",
         action="store_true",
