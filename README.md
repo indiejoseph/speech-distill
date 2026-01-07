@@ -299,6 +299,18 @@ python train.py \
     --student_prefix ""
 ```
 
+## Troubleshooting
+
+### Flash Attention Installation Issues
+
+If you encounter issues with flash-attention, you can install a pre-built wheel:
+
+```bash
+pip install https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.2/flash_attn-2.7.4+cu128torch2.7-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
+```
+
+This installs `flash_attn==2.7.4+cu128torch2.7` which is compatible with CUDA 12.8 and PyTorch 2.7.
+
 ## References
 
 - Teacher Model: [Soul-AILab/SoulX-Podcast-1.7B-dialect](https://huggingface.co/Soul-AILab/SoulX-Podcast-1.7B-dialect)
