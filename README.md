@@ -23,7 +23,94 @@ This creates `./student_model_aligned` with expanded vocabulary.
 
 ## Training
 
-### Quick Start
+### Stage 1: Text-to-Speech Token Alignment (Optional Warm-up)
+
+Before running the main distillation training, you can optionally run Stage 1 to help the model familiarize itself with the newly added speech tokens. This stage fine-tunes only the new speech token embeddings while keeping all other model weights frozen.
+
+**Benefits:**
+- Helps the model quickly learn the mapping between text and new speech tokens
+- Prevents catastrophic forgetting of pre-trained weights
+- Acts as a warm-up before full distillation training
+- Efficient training with minimal memory footprint
+
+**Usage:**
+```bash
+python stage1.py \
+    --model_path ./pretrained_models/Qwen3-0.6B \
+    --dataset_path /path/to/dataset \
+    --output_dir ./stage1_output \
+    --num_new_tokens 1000 \
+    --num_epochs 3 \
+    --batch_size 4 \
+    --learning_rate 1e-4 \
+    --gradient_checkpointing
+```
+
+**Stage 1 Parameters:**
+
+**Model & Data Arguments:**
+- `--model_path`: Path to the model with expanded vocabulary (required)
+- `--dataset_path`: Path to training dataset (required)
+- `--output_dir`: Output directory for checkpoints and final model (required)
+- `--num_new_tokens`: Number of newly added speech tokens (default: 1000)
+
+**Training Parameters:**
+- `--num_epochs`: Number of training epochs (default: 3)
+- `--batch_size`: Batch size for training (default: 4)
+- `--eval_batch_size`: Batch size for evaluation (default: 8)
+- `--learning_rate`: Learning rate (default: 1e-4)
+- `--warmup_steps`: Number of warmup steps (default: 1000)
+- `--weight_decay`: Weight decay (default: 0.01)
+- `--gradient_accumulation_steps`: Gradient accumulation steps (default: 4)
+- `--logging_steps`: Logging frequency (default: 50)
+- `--save_steps`: Save checkpoint frequency (default: 500)
+- `--eval_steps`: Evaluation frequency (default: 500)
+- `--eval_size`: Evaluation set size as fraction (default: 0.1)
+- `--max_seq_length`: Maximum sequence length (default: 2048)
+- `--num_workers`: Data loading workers (default: 4)
+
+**Token Configuration:**
+- `--text_bos`: Text begin-of-sequence token (default: `<|text_start|>`)
+- `--text_eos`: Text end-of-sequence token (default: `<|text_end|>`)
+- `--speech_bos`: Speech begin-of-sequence token (default: `<|semantic_token_start|>`)
+- `--speech_eos`: Speech end-of-sequence token (default: `<|semantic_token_end|>`)
+- `--prefix`: Prefix to add before text (default: "")
+- `--text_prefix`: Text prefix after eos, before speech tokens (default: "")
+
+**Optimization Options:**
+- `--gradient_checkpointing`: Enable gradient checkpointing to save memory (enabled by default)
+- `--use_8bit_optimizer`: Use 8-bit AdamW optimizer (enabled by default)
+- `--use_wandb`: Log to Weights & Biases
+- `--seed`: Random seed (default: 42)
+
+**How It Works:**
+1. Loads the model with expanded vocabulary (including new speech tokens)
+2. Freezes all model weights except the new speech token embeddings
+3. Uses gradient masking to prevent updates to original vocabulary tokens
+4. Trains with SFTTrainer on text-to-speech token alignment task
+5. Saves the warm-up checkpoint for use in Stage 2
+
+**Stage 1 Output:**
+- `./stage1_output/checkpoint-*/`: Training checkpoints
+- `./stage1_output/final_model/`: Final warm-up model
+- Best model loaded automatically if eval dataset is used
+
+**Example: Multi-epoch Stage 1 Training**
+```bash
+python stage1.py \
+    --model_path ./pretrained_models/Qwen3-0.6B \
+    --dataset_path /notebooks/bert-vits2/frankenstein-matcha2/tmp/dataset_small \
+    --output_dir ./stage1_output \
+    --num_new_tokens 1000 \
+    --num_epochs 5 \
+    --batch_size 8 \
+    --learning_rate 5e-5 \
+    --eval_size 0.1 \
+    --gradient_checkpointing \
+    --use_wandb
+```
+
+### Stage 2: Knowledge Distillation (Main Training)
 
 Basic training with audio-to-speech token processing:
 
@@ -152,12 +239,13 @@ python train.py \
 
 ```
 .
-├── train.py                    # Main training script
+├── stage1.py                   # Stage 1: Text-to-speech token alignment warm-up
+├── train.py                    # Stage 2: Main knowledge distillation training
 ├── data.py                     # Dataset processor and collators
 ├── distillation_loss.py        # KL divergence distillation loss
 ├── prepare_student.py          # Student vocab alignment
 ├── utils.py                    # Audio processing utilities
-└── requirements.txt           # Python dependencies
+└── requirements.txt            # Python dependencies
 ```
 
 ## Components
