@@ -89,6 +89,7 @@ def train(config):
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
+        attn_implementation="flash_attention_2",
     )
 
     print(f"Loading student model: {student_path}")
@@ -97,6 +98,7 @@ def train(config):
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
+        attn_implementation="flash_attention_2",
     )
 
     if config.use_lora:

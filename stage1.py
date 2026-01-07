@@ -16,10 +16,14 @@ Usage:
 import torch
 import argparse
 import os
+
+# Disable tokenizers parallelism to avoid fork warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset, load_from_disk
 from trl import SFTTrainer, SFTConfig
-from data import SpeechDistillDatasetProcessor
+from data import parse_prefix, SpeechDistillDatasetProcessor
 
 
 def freeze_model_weights(model, num_new_tokens):
@@ -134,6 +138,17 @@ def train_stage1(config):
     )
     freeze_model_weights(model, num_new_tokens)
 
+    # Parse and align prefix
+    print("\nProcessing prefix configuration...")
+    prefix = parse_prefix(config.prefix)
+    text_prefix = parse_prefix(config.text_prefix)
+
+    # If prefix is a dict (per-language), we'll use it as-is
+    if isinstance(prefix, dict):
+        print(f"Using per-language prefixes: {list(prefix.keys())}")
+    else:
+        print(f"Using prefix: {prefix if prefix else '(empty)'}")
+
     # Load dataset
     print(f"\nLoading dataset from: {config.dataset_path}")
     if os.path.exists(config.dataset_path):
@@ -162,37 +177,76 @@ def train_stage1(config):
     else:
         eval_dataset = None
 
-    # Stage 1: Text-to-embedding alignment training
-    # NOTE: We use text-only training because audio decoding (torchcodec) has compatibility issues
-    # with PyTorch 2.7.1. The goal is to train new speech token embeddings to align with text.
-    # We can add speech tokens in Stage 2 after audio processing is verified.
+    # Create processor for dataset (to extract speech tokens from audio and convert to input_ids)
+    print("\nCreating dataset processor for audio-to-tokens conversion...")
+    processor = SpeechDistillDatasetProcessor(
+        tokenizer=tokenizer,
+        prefix=prefix,
+        text_bos=config.text_bos,
+        text_eos=config.text_eos,
+        text_prefix=text_prefix,
+        speech_bos=config.speech_bos,
+        speech_eos=config.speech_eos,
+        device=device,
+    )
 
     # Process datasets to create text field for SFTTrainer
     print("\nProcessing dataset for SFTTrainer...")
     print(
-        "WARNING: Using text-only training (audio decoding requires additional dependencies)"
+        "Using SpeechDistillDatasetProcessor to convert audio to tokens, then to text"
     )
 
-    def format_for_sft(example):
-        """Format example as text for SFTTrainer to tokenize."""
-        try:
-            text = example.get("text", "").strip()
-            if not text:
-                return {"text": ""}
+    def format_for_sft(batch):
+        """Format batch of examples as text for SFTTrainer to tokenize.
 
-            # Format with text markers
-            # In full Stage 1, we would include speech tokens here
-            # But for now we train with text alignment only
-            formatted_text = f"{config.text_bos}{text}{config.text_eos}"
+        Uses SpeechDistillDatasetProcessor to convert audio to input_ids (including speech tokens),
+        then decodes back to text for SFTTrainer.
 
-            return {"text": formatted_text}
-        except Exception as e:
-            return {"text": ""}
+        Args:
+            batch: A batch dictionary with lists of examples (batched=True)
+        """
+        texts = []
+        for i in range(len(batch.get(list(batch.keys())[0], []))):
+            try:
+                # Extract single example from batch
+                example = {key: batch[key][i] for key in batch.keys()}
+
+                # Use processor to convert audio + text to input_ids
+                # This includes speech tokens extracted from audio
+                processed = processor.process_example(example)
+
+                # Get input_ids from processor output
+                input_ids = processed.get("input_ids", [])
+                if isinstance(input_ids, torch.Tensor):
+                    input_ids = input_ids.tolist()
+
+                # Convert input_ids back to text using tokenizer
+                # This preserves both text and speech tokens in text form
+                text_content = tokenizer.decode(input_ids)
+
+                if not text_content or not text_content.strip():
+                    texts.append("")
+                else:
+                    texts.append(text_content)
+            except Exception as e:
+                # Fallback: try with just text and no audio
+                try:
+                    text = example.get("text", "").strip()
+                    if text:
+                        texts.append(text)
+                    else:
+                        texts.append("")
+                except:
+                    texts.append("")
+
+        return {"text": texts}
 
     # Apply formatting to datasets
     print("Formatting train dataset...")
     train_dataset = train_dataset.map(
         format_for_sft,
+        batched=True,
+        batch_size=8,
         remove_columns=train_dataset.column_names,
         desc="Formatting train dataset",
     )
@@ -201,6 +255,8 @@ def train_stage1(config):
         print("Formatting eval dataset...")
         eval_dataset = eval_dataset.map(
             format_for_sft,
+            batched=True,
+            batch_size=8,
             remove_columns=eval_dataset.column_names,
             desc="Formatting eval dataset",
         )
@@ -396,7 +452,7 @@ def main():
         "--prefix",
         type=str,
         default="",
-        help="Prefix to add before text",
+        help="Prefix to add before text (string or JSON dict for per-language prefixes)",
     )
     parser.add_argument(
         "--text_bos",
@@ -413,8 +469,8 @@ def main():
     parser.add_argument(
         "--text_prefix",
         type=str,
-        default="",
-        help="Text prefix after eos, before speech tokens",
+        default='{"en": "", "zh": "", "yue": "<|Yue|>"}',
+        help="Text prefix after eos, before speech tokens (string or JSON dict for per-language prefixes)",
     )
     parser.add_argument(
         "--speech_bos",

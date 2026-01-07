@@ -4,24 +4,6 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
-def _noisy_mean_initialization(
-    embed_weight: "torch.Tensor", num_new_tokens: int
-) -> None:
-    """Initialize new token embeddings with mean + Gaussian noise.
-
-    This is the default initialization method used by LlamaFactory.
-
-    Args:
-        embed_weight: The embedding weight matrix to initialize (shape: [vocab_size, embedding_dim])
-        num_new_tokens: Number of new tokens added at the end of the embedding matrix
-    """
-    embedding_dim = embed_weight.size(1)
-    avg_weight = embed_weight[:-num_new_tokens].mean(dim=0, keepdim=True)
-    noise_weight = torch.empty_like(embed_weight[-num_new_tokens:])
-    noise_weight.normal_(mean=0, std=(1.0 / math.sqrt(embedding_dim)))
-    embed_weight[-num_new_tokens:] = avg_weight + noise_weight
-
-
 def expand_student_vocab(teacher_model_id, student_model_id, output_dir):
     print(f"Loading teacher tokenizer: {teacher_model_id}")
     teacher_tokenizer = AutoTokenizer.from_pretrained(
