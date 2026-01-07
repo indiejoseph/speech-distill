@@ -119,6 +119,10 @@ def train_stage1(config):
         config.model_path,
         trust_remote_code=True,
     )
+
+    # Remove chat template
+    tokenizer.chat_template = None
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -246,7 +250,7 @@ def train_stage1(config):
     train_dataset = train_dataset.map(
         format_for_sft,
         batched=True,
-        batch_size=8,
+        batch_size=32,
         remove_columns=train_dataset.column_names,
         desc="Formatting train dataset",
     )
@@ -256,7 +260,7 @@ def train_stage1(config):
         eval_dataset = eval_dataset.map(
             format_for_sft,
             batched=True,
-            batch_size=8,
+            batch_size=32,
             remove_columns=eval_dataset.column_names,
             desc="Formatting eval dataset",
         )
