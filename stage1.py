@@ -285,10 +285,19 @@ def train_stage1(config):
     if len(train_dataset) == 0:
         raise ValueError("Train dataset is empty after processing!")
 
+    # Print first example
+    print("\n" + "=" * 60)
+    print("First training example:")
+    print("=" * 60)
+    first_example = train_dataset[0]
+    print(f"Text length: {len(first_example.get('text', ''))}")
+    print(f"Text content:\n{first_example.get('text', '')[:500]}...")
+    print("=" * 60 + "\n")
+
     # Setup training arguments
     training_args = SFTConfig(
         output_dir=config.output_dir,
-        max_length=4096,
+        max_length=config.max_seq_length,
         num_train_epochs=config.num_epochs,
         per_device_train_batch_size=config.batch_size,
         per_device_eval_batch_size=config.eval_batch_size,
@@ -427,13 +436,13 @@ def main():
     parser.add_argument(
         "--eval_size",
         type=float,
-        default=0.1,
+        default=0,
         help="Evaluation set size (0-1)",
     )
     parser.add_argument(
         "--max_seq_length",
         type=int,
-        default=2048,
+        default=4096,
         help="Maximum sequence length",
     )
     parser.add_argument(
