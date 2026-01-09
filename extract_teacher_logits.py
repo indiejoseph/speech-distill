@@ -59,6 +59,7 @@ def extract_teacher_logprobs(config):
         text_prefix=text_prefix,
         speech_bos=config.speech_bos,
         speech_eos=config.speech_eos,
+        device=device,
         max_length=config.max_length,
     )
 
