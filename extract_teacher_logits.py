@@ -15,7 +15,7 @@ from data import (
 
 
 def extract_teacher_logprobs(config):
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 1. Load Teacher
     print(f"Loading teacher model from: {config.teacher_model_path}")
@@ -24,18 +24,20 @@ def extract_teacher_logprobs(config):
         config.teacher_model_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map="auto",
         attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
-    )
-
-    # Get the device of the model
-    # When using device_map="auto", model.device might be the first device
-    device = getattr(teacher, "device", next(teacher.parameters()).device)
+    ).to(device)
 
     tokenizer = AutoTokenizer.from_pretrained(
         config.teacher_model_path, trust_remote_code=True
     )
-    if tokenizer.pad_token is None:
+    if config.pad_token:
+        if config.pad_token not in tokenizer.get_vocab():
+            raise ValueError(
+                f"Specified pad_token '{config.pad_token}' not found in tokenizer vocabulary. "
+                "Please ensure the token exists or use a different one."
+            )
+        tokenizer.pad_token = config.pad_token
+    elif tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     teacher.eval()
@@ -77,7 +79,11 @@ def extract_teacher_logprobs(config):
         dataset.set_transform(transform_fn)
 
     # 4. Setup Collator and DataLoader
-    collator = ProcessedDataCollator(tokenizer=tokenizer, speech_bos=config.speech_bos)
+    collator = ProcessedDataCollator(
+        tokenizer=tokenizer,
+        speech_bos=config.speech_bos,
+        pad_token_id=tokenizer.pad_token_id,
+    )
 
     dataloader = DataLoader(
         dataset,
@@ -201,6 +207,12 @@ if __name__ == "__main__":
         type=str,
         default="<|semantic_token_end|>",
         help="Speech eos",
+    )
+    parser.add_argument(
+        "--pad_token",
+        type=str,
+        default="<|semantic_token_end|>",
+        help="Padding token",
     )
 
     args = parser.parse_args()

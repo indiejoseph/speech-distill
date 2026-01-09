@@ -138,7 +138,16 @@ def train(config):
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(student_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
+
+    # Set pad_token from config
+    if config.pad_token:
+        if config.pad_token not in tokenizer.get_vocab():
+            raise ValueError(
+                f"Specified pad_token '{config.pad_token}' not found in tokenizer vocabulary. "
+                f"Please ensure the token exists or use a different one."
+            )
+        tokenizer.pad_token = config.pad_token
+    elif tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # Align teacher and student prefixes by left-padding the shorter one
@@ -219,10 +228,10 @@ def train(config):
     data_collator = ProcessedDataCollator(
         tokenizer,
         speech_bos=config.speech_bos,
-        pad_token_id=153478,  # <|semantic_token_end|>
+        pad_token_id=tokenizer.pad_token_id,
     )
     print(
-        f"Using ProcessedDataCollator with on-the-fly processing (set_transform), speech_bos={config.speech_bos}"
+        f"Using ProcessedDataCollator with on-the-fly processing (set_transform), speech_bos={config.speech_bos}, pad_token={tokenizer.pad_token} (id={tokenizer.pad_token_id})"
     )
 
     # Apply on-the-fly transformation
@@ -457,6 +466,12 @@ if __name__ == "__main__":
         type=str,
         default="<|semantic_token_end|>",
         help="Speech end-of-sequence token",
+    )
+    parser.add_argument(
+        "--pad_token",
+        type=str,
+        default="<|semantic_token_end|>",
+        help="Padding token for the model",
     )
 
     main_args = parser.parse_args()
