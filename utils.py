@@ -158,6 +158,7 @@ def prepare_inputs(
     speech_eos: str,
     tokenizer: "AutoTokenizer",
     device="cpu",
+    max_length: Optional[int] = None,
 ):
     """
     Prepare model inputs with text and speech tokens.
@@ -173,6 +174,7 @@ def prepare_inputs(
         speech_eos: Speech end-of-sequence token
         tokenizer: Tokenizer for text encoding
         device: Device to use (default: "cpu")
+        max_length: Maximum sequence length for tokenization
 
     Returns:
         Tokenized inputs with input_ids and attention_mask
@@ -193,7 +195,13 @@ def prepare_inputs(
     )
 
     # Tokenize text
-    text_inputs = tokenizer(text, return_tensors="pt", return_attention_mask=True)
+    text_inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        return_attention_mask=True,
+        truncation=max_length is not None,
+        max_length=max_length,
+    )
 
     return text_inputs
 
@@ -209,6 +217,7 @@ def prepare_inputs_batch(
     speech_eos: str,
     tokenizer: "AutoTokenizer",
     device="cpu",
+    max_length: Optional[int] = None,
 ):
     """
     Prepare a batch of model inputs with text and speech tokens.
@@ -237,6 +246,12 @@ def prepare_inputs_batch(
 
     # Tokenize batch
     # We don't pad here because the collator will handle it
-    text_inputs = tokenizer(batch_texts, padding=False, return_attention_mask=True)
+    text_inputs = tokenizer(
+        batch_texts,
+        padding=False,
+        return_attention_mask=True,
+        truncation=max_length is not None,
+        max_length=max_length,
+    )
 
     return text_inputs

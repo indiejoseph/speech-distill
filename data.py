@@ -80,6 +80,7 @@ class SpeechDistillDatasetProcessor:
         speech_bos: str = "<|semantic_token_start|>",
         speech_eos: str = "<|semantic_token_end|>",
         device: str = "cpu",
+        max_length: Optional[int] = None,
     ):
         self.tokenizer = tokenizer
         self.prefix = prefix
@@ -89,6 +90,7 @@ class SpeechDistillDatasetProcessor:
         self.speech_bos = speech_bos
         self.speech_eos = speech_eos
         self.device = device
+        self.max_length = max_length
 
     def _get_prefix(self, text: str, lang: str = "") -> str:
         """Get prefix based on text and language."""
@@ -146,6 +148,7 @@ class SpeechDistillDatasetProcessor:
             speech_eos=self.speech_eos,
             tokenizer=self.tokenizer,
             device=self.device,
+            max_length=self.max_length,
         )
 
         return {
@@ -185,6 +188,7 @@ class SpeechDistillDatasetProcessor:
             speech_eos=self.speech_eos,
             tokenizer=self.tokenizer,
             device=self.device,
+            max_length=self.max_length,
         )
 
         # Return as lists of tensors (not padded yet)
@@ -254,6 +258,18 @@ class ProcessedDataCollator:
             batch["teacher_input_ids"] = teacher_batch["input_ids"]
             batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
 
+        # Handle Pre-calculated Teacher Logprobs
+        top_v = [f.get("teacher_top_k_v") for f in features if "teacher_top_k_v" in f]
+        top_i = [f.get("teacher_top_k_i") for f in features if "teacher_top_k_i" in f]
+
+        if top_v and top_v[0] is not None:
+            # Re-use the max_length from the batch padding
+            max_len = batch["input_ids"].size(1)
+            batch["teacher_top_k_v"] = self._pad_logits(
+                top_v, max_len, padding_value=0.0
+            )
+            batch["teacher_top_k_i"] = self._pad_logits(top_i, max_len, padding_value=0)
+
         # Mask out text tokens (tokens before speech_bos)
         speech_mask = self._create_speech_token_mask(batch["input_ids"])
         if speech_mask is not None:
@@ -310,6 +326,26 @@ class ProcessedDataCollator:
             "input_ids": torch.stack(batch_input_ids),
             "attention_mask": torch.stack(batch_attention_mask),
         }
+
+    def _pad_logits(self, logit_list, max_length, padding_value=0.0):
+        """Pad logit tensors [seq_len, K] to [max_length, K]."""
+        batch_logits = []
+        for l in logit_list:
+            if not isinstance(l, torch.Tensor):
+                l = torch.tensor(l)
+
+            p_len = max_length - l.size(0)
+            if p_len > 0:
+                # Pad in the sequence dimension (dim=0)
+                padding = torch.full(
+                    (p_len, l.size(1)), padding_value, dtype=l.dtype, device=l.device
+                )
+                l = torch.cat([l, padding], dim=0)
+            elif p_len < 0:
+                l = l[:max_length]
+
+            batch_logits.append(l)
+        return torch.stack(batch_logits)
 
     def _create_speech_token_mask(
         self, input_ids: torch.Tensor

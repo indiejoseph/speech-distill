@@ -11,25 +11,64 @@ class DistillationLoss(nn.Module):
         self.kl_div = nn.KLDivLoss(reduction="batchmean")
         self.ce_loss = nn.CrossEntropyLoss()
 
-    def forward(self, student_logits, teacher_logits, labels, speech_token_mask=None):
+    def forward(
+        self,
+        student_logits,
+        labels,
+        teacher_logits=None,
+        teacher_top_k_v=None,
+        teacher_top_k_i=None,
+        speech_token_mask=None,
+    ):
         """
         student_logits: [batch_size, seq_len, vocab_size]
-        teacher_logits: [batch_size, seq_len, vocab_size]
+        teacher_logits: [batch_size, seq_len, vocab_size] (Optional if top_k provided)
+        teacher_top_k_v: [batch_size, seq_len, K] (Optional)
+        teacher_top_k_i: [batch_size, seq_len, K] (Optional)
         labels: [batch_size, seq_len]
-        speech_token_mask: [batch_size, seq_len] - binary mask where 1 = speech token positions
-                          If None, use entire sequence. If provided, only compute loss on speech tokens.
         """
         # Causal shift: logits[i] predicts labels[i+1]
         shift_student = (
             student_logits[..., :-1, :].contiguous().view(-1, student_logits.size(-1))
         )
-        shift_teacher = (
-            teacher_logits[..., :-1, :]
-            .contiguous()
-            .view(-1, teacher_logits.size(-1))
-            .detach()
-        )
         shift_labels = labels[..., 1:].contiguous().view(-1)
+
+        # Handle Teacher Logits (either full or sparse)
+        if teacher_logits is not None:
+            shift_teacher = (
+                teacher_logits[..., :-1, :]
+                .contiguous()
+                .view(-1, teacher_logits.size(-1))
+                .detach()
+            )
+        elif teacher_top_k_v is not None and teacher_top_k_i is not None:
+            # Reconstruct sparse logprobs
+            B_seq, T_seq, K = teacher_top_k_v.shape
+            V = student_logits.size(-1)
+
+            # Move sparse data to student device and shift
+            v = (
+                teacher_top_k_v[..., :-1, :]
+                .contiguous()
+                .view(-1, K)
+                .to(student_logits.device)
+            )
+            i = (
+                teacher_top_k_i[..., :-1, :]
+                .contiguous()
+                .view(-1, K)
+                .to(student_logits.device)
+            )
+
+            # For KL divergence, we can often just use the Top-K as a sparse distribution
+            # provided we handle the softmax correctly.
+            # Here we reconstruct a sparse "pseudo-distribution"
+            shift_teacher = torch.full(
+                (v.size(0), V), -10000.0, device=v.device, dtype=v.dtype
+            )
+            shift_teacher.scatter_(-1, i.long(), v.float())  # Restore logprobs
+        else:
+            raise ValueError("Either teacher_logits or top_k must be provided")
 
         # Create a combined mask: Speech mask AND not padding (-100)
         if speech_token_mask is not None:

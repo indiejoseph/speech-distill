@@ -23,36 +23,41 @@ class DistillationTrainer(Trainer):
         self.distill_loss_fn = DistillationLoss(temperature=temperature, alpha=alpha)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        if self.teacher_model is None:
-            raise ValueError("teacher_model must be provided to DistillationTrainer")
-
-        # Extract teacher inputs if they exist
+        # Extract metadata
         teacher_input_ids = inputs.pop("teacher_input_ids", None)
         teacher_attention_mask = inputs.pop("teacher_attention_mask", None)
+        speech_mask = inputs.pop("speech_token_mask", None)
 
-        # Extract speech token mask if it exists (marks where speech tokens start)
-        speech_token_mask = inputs.pop("speech_token_mask", None)
+        # Extract pre-calculated logits if they exist
+        teacher_top_k_v = inputs.pop("teacher_top_k_v", None)
+        teacher_top_k_i = inputs.pop("teacher_top_k_i", None)
 
         # Student forward pass
         outputs = model(**inputs)
         student_logits = outputs.logits
         labels = inputs.get("labels")
 
-        # Teacher forward pass (no gradients)
-        with torch.no_grad():
-            if teacher_input_ids is not None:
-                teacher_outputs = self.teacher_model(
-                    input_ids=teacher_input_ids, attention_mask=teacher_attention_mask
-                )
-            else:
-                teacher_outputs = self.teacher_model(**inputs)
-            teacher_logits = teacher_outputs.logits
+        teacher_logits = None
+        # Teacher forward pass (ONLY if pre-calculated logits are missing)
+        if teacher_top_k_v is None and self.teacher_model is not None:
+            with torch.no_grad():
+                if teacher_input_ids is not None:
+                    teacher_outputs = self.teacher_model(
+                        input_ids=teacher_input_ids,
+                        attention_mask=teacher_attention_mask,
+                    )
+                else:
+                    teacher_outputs = self.teacher_model(**inputs)
+                teacher_logits = teacher_outputs.logits
 
         # Compute distillation loss
         loss, task_loss, distill_loss, teacher_loss = self.distill_loss_fn(
-            student_logits,
-            teacher_logits,
-            labels,
+            student_logits=student_logits,
+            labels=labels,
+            teacher_logits=teacher_logits,
+            teacher_top_k_v=teacher_top_k_v,
+            teacher_top_k_i=teacher_top_k_i,
+            speech_token_mask=speech_mask,
         )
 
         # Log individual losses
@@ -164,35 +169,6 @@ def train(config):
     print(f"Dataset loaded: {len(train_dataset)} examples")
     print(f"Dataset columns: {train_dataset.column_names}")
 
-    # Filter by audio duration if requested
-    if config.max_duration > 0:
-        print(f"Filtering dataset for audio duration <= {config.max_duration}s...")
-
-        def filter_duration(example):
-            # Check for explicit duration column first
-            if "duration" in example and example["duration"] is not None:
-                return example["duration"] <= config.max_duration
-
-            # Otherwise calculate from audio array
-            audio = example.get("audio")
-            if audio is not None:
-                if (
-                    isinstance(audio, dict)
-                    and "array" in audio
-                    and "sampling_rate" in audio
-                ):
-                    # Handle case where array might be a list or numpy array
-                    array_len = len(audio["array"])
-                    sampling_rate = audio["sampling_rate"]
-                    if sampling_rate > 0:
-                        duration = array_len / sampling_rate
-                        return duration <= config.max_duration
-            # If no audio or duration info, keep it
-            return True
-
-        train_dataset = train_dataset.filter(filter_duration, num_proc=16)
-        print(f"Dataset size after filtering: {len(train_dataset)}")
-
     # Process dataset with SpeechDistillDatasetProcessor
     # Create separate processors for student and teacher with different prefixes
     print("Using SpeechDistillDatasetProcessor to convert audio to speech tokens...")
@@ -220,6 +196,7 @@ def train(config):
         speech_bos=config.speech_bos,
         speech_eos=config.speech_eos,
         device=device,
+        max_length=config.max_length,
     )
 
     # Teacher processor (prefix can be string, dict, or callable)
@@ -232,6 +209,7 @@ def train(config):
         speech_bos=config.speech_bos,
         speech_eos=config.speech_eos,
         device=device,
+        max_length=config.max_length,
     )
 
     # Create the picklable processor
@@ -364,12 +342,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--max_length", type=int, default=512, help="Max sequence length"
-    )
-    parser.add_argument(
-        "--max_duration",
-        type=float,
-        default=10.0,
-        help="Max audio duration in seconds (default: 10.0)",
     )
     parser.add_argument(
         "--teacher_prefix",
