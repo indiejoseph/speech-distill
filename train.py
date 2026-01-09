@@ -111,6 +111,13 @@ def train(config):
         attn_implementation="flash_attention_2",
     )
 
+    # Set teacher to eval mode (disables dropout, batch norm uses running stats)
+    teacher_model.eval()
+
+    # Disable gradients for teacher model (it should never be updated)
+    for param in teacher_model.parameters():
+        param.requires_grad_(False)
+
     print(f"Loading student model: {student_path}")
     student_model = AutoModelForCausalLM.from_pretrained(
         student_path,
