@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import argparse
 import os
 from transformers import Trainer, TrainingArguments, AutoModelForCausalLM, AutoTokenizer
@@ -15,11 +16,14 @@ from data import (
 
 
 class DistillationTrainer(Trainer):
-    def __init__(self, *args, teacher_model=None, temperature=2.0, alpha=0.5, **kwargs):
+    def __init__(
+        self, *args, teacher_model=None, temperature=2.0, alpha=0.5, top_k=100, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.teacher_model = teacher_model
         if self.teacher_model is not None:
             self.teacher_model.eval()
+        self.top_k = top_k
         self.distill_loss_fn = DistillationLoss(temperature=temperature, alpha=alpha)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -49,6 +53,16 @@ class DistillationTrainer(Trainer):
                 else:
                     teacher_outputs = self.teacher_model(**inputs)
                 teacher_logits = teacher_outputs.logits
+
+        # Extract sparse logits from full teacher logits if pre-calculated ones are missing
+        if teacher_logits is not None and teacher_top_k_v is None:
+            with torch.no_grad():
+                teacher_logprobs = F.log_softmax(teacher_logits, dim=-1)
+                teacher_top_k_v, teacher_top_k_i = torch.topk(
+                    teacher_logprobs, k=self.top_k, dim=-1
+                )
+            # Clear full logits to save memory
+            teacher_logits = None
 
         # Compute distillation loss
         loss, task_loss, distill_loss, teacher_loss = self.distill_loss_fn(
@@ -276,6 +290,7 @@ def train(config):
         processing_class=tokenizer,
         temperature=config.temperature,
         alpha=config.alpha,
+        top_k=config.top_k,
     )
 
     # Print a sample to verify processing
@@ -472,6 +487,12 @@ if __name__ == "__main__":
         type=str,
         default="<|semantic_token_end|>",
         help="Padding token for the model",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=128,
+        help="Number of top logits to keep for sparse distillation (used if pre-calculated logits not available)",
     )
 
     main_args = parser.parse_args()
