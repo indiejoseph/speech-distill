@@ -9,11 +9,13 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from data import (
     ProcessedDataCollator,
+    SpeechDistillDatasetProcessor,
+    parse_prefix,
 )
 
 
 def extract_teacher_logprobs(config):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 1. Load Teacher
     print(f"Loading teacher model from: {config.teacher_model_path}")
@@ -26,6 +28,10 @@ def extract_teacher_logprobs(config):
         attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
     )
 
+    # Get the device of the model
+    # When using device_map="auto", model.device might be the first device
+    device = getattr(teacher, "device", next(teacher.parameters()).device)
+
     tokenizer = AutoTokenizer.from_pretrained(
         config.teacher_model_path, trust_remote_code=True
     )
@@ -34,17 +40,43 @@ def extract_teacher_logprobs(config):
 
     teacher.eval()
 
-    # 2. Load Processed Dataset
+    # 2. Load Dataset
     print(f"Loading dataset from: {config.dataset_path}")
     if os.path.exists(config.dataset_path):
         dataset = load_from_disk(config.dataset_path)
     else:
         dataset = load_dataset(config.dataset_path, split=config.dataset_split)
 
-    # 3. Setup Collator and DataLoader
-    collator = ProcessedDataCollator(
-        tokenizer=tokenizer, speech_bos="<|semantic_token_start|>"
+    # 3. Setup Processor
+    teacher_prefix = parse_prefix(config.teacher_prefix)
+    text_prefix = parse_prefix(config.text_prefix)
+
+    processor = SpeechDistillDatasetProcessor(
+        tokenizer=tokenizer,
+        prefix=teacher_prefix,
+        text_bos=config.text_bos,
+        text_eos=config.text_eos,
+        text_prefix=text_prefix,
+        speech_bos=config.speech_bos,
+        speech_eos=config.speech_eos,
+        max_length=config.max_length,
     )
+
+    # Apply transform if dataset doesn't already have input_ids
+    if "input_ids" not in dataset.column_names:
+
+        def transform_fn(examples):
+            # Check if examples is batched (dict of lists) or single (dict)
+            is_batched = isinstance(examples.get("text", examples.get("audio")), list)
+            if is_batched:
+                return processor.process_batch(examples)
+            else:
+                return processor.process_example(examples)
+
+        dataset.set_transform(transform_fn)
+
+    # 4. Setup Collator and DataLoader
+    collator = ProcessedDataCollator(tokenizer=tokenizer, speech_bos=config.speech_bos)
 
     dataloader = DataLoader(
         dataset,
@@ -53,7 +85,7 @@ def extract_teacher_logprobs(config):
         shuffle=False,  # CRITICAL: Must be False to preserve dataset order
     )
 
-    # 4. Extraction Loop
+    # 5. Extraction Loop
     top_k = config.top_k
     all_top_v = []
     all_top_i = []
@@ -129,6 +161,45 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--top_k", type=int, default=100, help="Number of logits to keep per token"
+    )
+    parser.add_argument(
+        "--max_length", type=int, default=None, help="Max sequence length"
+    )
+    parser.add_argument(
+        "--teacher_prefix",
+        type=str,
+        default="<|task_podcast|><|SPEAKER_0|>",
+        help="Prefix for teacher input",
+    )
+    parser.add_argument(
+        "--text_prefix",
+        type=str,
+        default='{"en": "", "zh": "", "yue": "<|Yue|>"}',
+        help="Text prefix",
+    )
+    parser.add_argument(
+        "--text_bos",
+        type=str,
+        default="<|text_start|>",
+        help="Text bos",
+    )
+    parser.add_argument(
+        "--text_eos",
+        type=str,
+        default="<|text_end|>",
+        help="Text eos",
+    )
+    parser.add_argument(
+        "--speech_bos",
+        type=str,
+        default="<|semantic_token_start|>",
+        help="Speech bos",
+    )
+    parser.add_argument(
+        "--speech_eos",
+        type=str,
+        default="<|semantic_token_end|>",
+        help="Speech eos",
     )
 
     args = parser.parse_args()
