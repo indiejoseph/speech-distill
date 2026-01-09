@@ -254,11 +254,10 @@ class ProcessedDataCollator:
             batch["teacher_input_ids"] = teacher_batch["input_ids"]
             batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
 
-        # Create speech token mask (mark positions from <|speech_bos|> onwards)
-        # This helps focus KL divergence on speech token prediction only
-        speech_token_mask = self._create_speech_token_mask(batch["input_ids"])
-        if speech_token_mask is not None:
-            batch["speech_token_mask"] = speech_token_mask
+        # Mask out text tokens (tokens before speech_bos)
+        speech_mask = self._create_speech_token_mask(batch["input_ids"])
+        if speech_mask is not None:
+            batch["labels"][speech_mask == 0] = -100
 
         return batch
 
@@ -326,30 +325,11 @@ class ProcessedDataCollator:
             [batch_size, seq_len] binary mask where 1 = speech token position, 0 = text
         """
         try:
-            # Try to find speech_bos token ID
-            speech_bos_candidates = [
-                self.speech_bos,
-                "<|semantic|>",
-                "<|speech_bos|>",
-                "<|speech|>",
-                "<|semantic_token_start|>",
-            ]
-            speech_bos_token_id = None
-
-            for candidate in speech_bos_candidates:
-                try:
-                    token_ids = self.tokenizer.encode(
-                        candidate, add_special_tokens=False
-                    )
-                    if token_ids:
-                        speech_bos_token_id = token_ids[0]
-                        break
-                except:
-                    continue
-
-            if speech_bos_token_id is None:
-                # If we can't find speech token, return None (use entire sequence)
+            # Get speech_bos token ID
+            token_ids = self.tokenizer.encode(self.speech_bos, add_special_tokens=False)
+            if not token_ids:
                 return None
+            speech_bos_token_id = token_ids[0]
 
             # Create mask: 1 where token appears onwards, 0 before
             batch_size, seq_len = input_ids.shape
