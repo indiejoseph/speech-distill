@@ -79,7 +79,9 @@ class DistillationLoss(nn.Module):
                 teacher_top_k_v[..., :-1, :]
                 .contiguous()
                 .view(-1, K)[valid_mask]
-                .to(student_logits.device)
+                .to(
+                    student_logits.device, dtype=torch.float32
+                )  # Convert fp16→fp32 only when needed
             )
             i_valid = (
                 teacher_top_k_i[..., :-1, :]
@@ -89,8 +91,8 @@ class DistillationLoss(nn.Module):
             )
 
             # Teacher distribution (renormalized over Top-K at current temperature)
-            soft_t = F.softmax(v_valid.float() / self.temperature, dim=-1)
-            log_soft_t = F.log_softmax(v_valid.float() / self.temperature, dim=-1)
+            soft_t = F.softmax(v_valid / self.temperature, dim=-1)  # Compute in fp32
+            log_soft_t = F.log_softmax(v_valid / self.temperature, dim=-1)
 
             # Student distribution (full vocab)
             log_soft_s_all = F.log_softmax(s_logits / self.temperature, dim=-1)
@@ -99,7 +101,6 @@ class DistillationLoss(nn.Module):
             log_soft_s_gathered = log_soft_s_all.gather(-1, i_valid.long())
 
             # Sparse KL: \sum P_teacher * (log P_teacher - log Q_student)
-            # We use sum reduction and divide by number of tokens manually
             distill_loss = (
                 (soft_t * (log_soft_t - log_soft_s_gathered)).sum(dim=-1).mean()
             ) * (self.temperature**2)

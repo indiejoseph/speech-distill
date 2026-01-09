@@ -39,7 +39,7 @@ class DistillationTrainer(Trainer):
         # Student forward pass
         outputs = model(**inputs)
         student_logits = outputs.logits
-        labels = inputs.get("labels")
+        labels = inputs.pop("labels", None)  # Pop to free input dict memory
 
         teacher_logits = None
         # Teacher forward pass (ONLY if pre-calculated logits are missing)
@@ -57,12 +57,20 @@ class DistillationTrainer(Trainer):
         # Extract sparse logits from full teacher logits if pre-calculated ones are missing
         if teacher_logits is not None and teacher_top_k_v is None:
             with torch.no_grad():
-                teacher_logprobs = F.log_softmax(teacher_logits, dim=-1)
+                # Truncate to actual vocab size (in case model outputs extra logits)
+                vocab_size = student_logits.size(-1)
+                teacher_logits_truncated = teacher_logits[..., :vocab_size]
+
+                teacher_logprobs = F.log_softmax(teacher_logits_truncated, dim=-1)
                 teacher_top_k_v, teacher_top_k_i = torch.topk(
                     teacher_logprobs, k=self.top_k, dim=-1
                 )
+                # Cast to fp16 early to save memory in loss computation
+                teacher_top_k_v = teacher_top_k_v.to(torch.float16)
+                teacher_top_k_i = teacher_top_k_i.to(torch.int32)
             # Clear full logits to save memory
             teacher_logits = None
+            del teacher_logprobs
 
         # Compute distillation loss
         loss, task_loss, distill_loss, teacher_loss = self.distill_loss_fn(
