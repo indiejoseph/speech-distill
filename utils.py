@@ -2,7 +2,7 @@ import s3tokenizer
 import numpy as np
 import torch
 import torchaudio
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Union, Optional
 
 if TYPE_CHECKING:
     from transformers import AutoTokenizer
