@@ -2,7 +2,13 @@ import torch
 import torch.nn.functional as F
 import argparse
 import os
-from transformers import Trainer, TrainingArguments, AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    Trainer,
+    TrainingArguments,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+)
 from datasets import load_dataset, load_from_disk
 from distillation_loss import DistillationLoss
 from peft import LoraConfig, get_peft_model
@@ -55,7 +61,13 @@ class DistillationTrainer(Trainer):
                 teacher_logits = teacher_outputs.logits
 
         # Extract sparse logits from full teacher logits if pre-calculated ones are missing
-        if teacher_logits is not None and teacher_top_k_v is None:
+        # NOTE: Skip sparse extraction for 8-bit quantized teachers (use dense instead)
+        # 8-bit quantization affects logit precision, making sparse top-K unreliable
+        if (
+            teacher_logits is not None
+            and teacher_top_k_v is None
+            and not getattr(self, "_is_8bit_teacher", False)
+        ):
             with torch.no_grad():
                 # Truncate to actual vocab size (in case model outputs extra logits)
                 vocab_size = student_logits.size(-1)
@@ -111,12 +123,25 @@ def train(config):
 
     # Load models
     print(f"Loading teacher model: {teacher_id}")
+
+    # Setup 8-bit quantization for teacher if enabled
+    quantization_config = None
+    if config.load_teacher_in_8bit:
+        print("Loading teacher in 8-bit (quantized) for memory efficiency...")
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_8bit_compute_dtype=torch.bfloat16,
+            bnb_8bit_use_double_quant=True,
+            bnb_8bit_quant_type="nf8",
+        )
+
     teacher_model = AutoModelForCausalLM.from_pretrained(
         teacher_id,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16 if not config.load_teacher_in_8bit else None,
         device_map="auto",
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
+        quantization_config=quantization_config,
     )
 
     # Set teacher to eval mode (disables dropout, batch norm uses running stats)
@@ -307,6 +332,13 @@ def train(config):
         alpha=config.alpha,
         top_k=config.top_k,
     )
+
+    # Mark if teacher is 8-bit quantized (affects sparse distillation)
+    trainer._is_8bit_teacher = config.load_teacher_in_8bit
+    if config.load_teacher_in_8bit:
+        print("⚠️  Teacher is 8-bit quantized: using dense distillation (not sparse KL)")
+    else:
+        print("✓ Teacher is full precision: using sparse distillation")
 
     # Print a sample to verify processing
     print("\n" + "=" * 50)
@@ -508,6 +540,11 @@ if __name__ == "__main__":
         type=int,
         default=128,
         help="Number of top logits to keep for sparse distillation (used if pre-calculated logits not available)",
+    )
+    parser.add_argument(
+        "--load_teacher_in_8bit",
+        action="store_true",
+        help="Load teacher model in 8-bit quantization to save VRAM (~75% reduction). Only for inference, does not affect training quality.",
     )
 
     main_args = parser.parse_args()
