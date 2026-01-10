@@ -124,9 +124,19 @@ def train(config):
     # Load models
     print(f"Loading teacher model: {teacher_id}")
 
-    # Setup 8-bit quantization for teacher if enabled
+    # Setup quantization for teacher if enabled
     quantization_config = None
-    if config.load_teacher_in_8bit:
+    is_quantized = False
+    if config.load_teacher_in_4bit:
+        print("Loading teacher in 4-bit (quantized) for maximum memory efficiency...")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        is_quantized = True
+    elif config.load_teacher_in_8bit:
         print("Loading teacher in 8-bit (quantized) for memory efficiency...")
         quantization_config = BitsAndBytesConfig(
             load_in_8bit=True,
@@ -134,6 +144,7 @@ def train(config):
             bnb_8bit_use_double_quant=True,
             bnb_8bit_quant_type="nf8",
         )
+        is_quantized = True
 
     teacher_model = AutoModelForCausalLM.from_pretrained(
         teacher_id,
@@ -232,9 +243,11 @@ def train(config):
     print(f"Dataset loaded: {len(train_dataset)} examples")
     print(f"Dataset columns: {train_dataset.column_names}")
 
-    # Process dataset with SpeechDistillDatasetProcessor
-    # Create separate processors for student and teacher with different prefixes
-    print("Using SpeechDistillDatasetProcessor to convert audio to speech tokens...")
+    # Check if dataset is pre-processed (has student_input_ids and teacher_input_ids)
+    is_preprocessed = (
+        "student_input_ids" in train_dataset.column_names
+        and "teacher_input_ids" in train_dataset.column_names
+    )
 
     # Split dataset into train and test first
     if config.test_size > 0:
@@ -249,49 +262,64 @@ def train(config):
     else:
         eval_dataset = None
 
-    # Student processor (prefix can be string, dict, or callable)
-    student_processor = SpeechDistillDatasetProcessor(
-        tokenizer=tokenizer,
-        prefix=student_prefix,
-        text_bos=config.text_bos,
-        text_eos=config.text_eos,
-        text_prefix=text_prefix,
-        speech_bos=config.speech_bos,
-        speech_eos=config.speech_eos,
-        device=device,
-        max_length=config.max_length,
-    )
-
-    # Teacher processor (prefix can be string, dict, or callable)
-    teacher_processor = SpeechDistillDatasetProcessor(
-        tokenizer=tokenizer,
-        prefix=teacher_prefix,
-        text_bos=config.text_bos,
-        text_eos=config.text_eos,
-        text_prefix=text_prefix,
-        speech_bos=config.speech_bos,
-        speech_eos=config.speech_eos,
-        device=device,
-        max_length=config.max_length,
-    )
-
-    # Create the picklable processor
-    distill_processor = DistillationDataProcessor(student_processor, teacher_processor)
-
     # Use ProcessedDataCollator for already-processed data
     data_collator = ProcessedDataCollator(
         tokenizer,
         speech_bos=config.speech_bos,
         pad_token_id=tokenizer.pad_token_id,
     )
-    print(
-        f"Using ProcessedDataCollator with on-the-fly processing (set_transform), speech_bos={config.speech_bos}, pad_token={tokenizer.pad_token} (id={tokenizer.pad_token_id})"
-    )
 
-    # Apply on-the-fly transformation
-    train_dataset.set_transform(distill_processor)
-    if eval_dataset is not None:
-        eval_dataset.set_transform(distill_processor)
+    if is_preprocessed:
+        print(
+            "✓ Dataset is pre-processed (contains student_input_ids, teacher_input_ids)"
+        )
+        print(f"  Using ProcessedDataCollator with pre-processed features")
+    else:
+        # Process dataset with SpeechDistillDatasetProcessor on-the-fly
+        print("✗ Dataset is raw (no student_input_ids, teacher_input_ids)")
+        print(
+            "  Using SpeechDistillDatasetProcessor with on-the-fly processing (set_transform)"
+        )
+        print(
+            "  Tip: Pre-process dataset once with prepare_dataset.py for faster training!"
+        )
+
+        # Create separate processors for student and teacher with different prefixes
+        # Student processor (prefix can be string, dict, or callable)
+        student_processor = SpeechDistillDatasetProcessor(
+            tokenizer=tokenizer,
+            prefix=student_prefix,
+            text_bos=config.text_bos,
+            text_eos=config.text_eos,
+            text_prefix=text_prefix,
+            speech_bos=config.speech_bos,
+            speech_eos=config.speech_eos,
+            device=device,
+            max_length=config.max_length,
+        )
+
+        # Teacher processor (prefix can be string, dict, or callable)
+        teacher_processor = SpeechDistillDatasetProcessor(
+            tokenizer=tokenizer,
+            prefix=teacher_prefix,
+            text_bos=config.text_bos,
+            text_eos=config.text_eos,
+            text_prefix=text_prefix,
+            speech_bos=config.speech_bos,
+            speech_eos=config.speech_eos,
+            device=device,
+            max_length=config.max_length,
+        )
+
+        # Create the picklable processor
+        distill_processor = DistillationDataProcessor(
+            student_processor, teacher_processor
+        )
+
+        # Apply on-the-fly transformation
+        train_dataset.set_transform(distill_processor)
+        if eval_dataset is not None:
+            eval_dataset.set_transform(distill_processor)
 
     # Training arguments
     training_args = TrainingArguments(
@@ -333,10 +361,13 @@ def train(config):
         top_k=config.top_k,
     )
 
-    # Mark if teacher is 8-bit quantized (affects sparse distillation)
-    trainer._is_8bit_teacher = config.load_teacher_in_8bit
-    if config.load_teacher_in_8bit:
-        print("⚠️  Teacher is 8-bit quantized: using dense distillation (not sparse KL)")
+    # Mark if teacher is quantized (affects sparse distillation)
+    trainer._is_8bit_teacher = is_quantized
+    if is_quantized:
+        quantization_mode = "4-bit" if config.load_teacher_in_4bit else "8-bit"
+        print(
+            f"⚠️  Teacher is {quantization_mode} quantized: using dense distillation (not sparse KL)"
+        )
     else:
         print("✓ Teacher is full precision: using sparse distillation")
 
@@ -542,9 +573,14 @@ if __name__ == "__main__":
         help="Number of top logits to keep for sparse distillation (used if pre-calculated logits not available)",
     )
     parser.add_argument(
+        "--load_teacher_in_4bit",
+        action="store_true",
+        help="Load teacher model in 4-bit quantization to save VRAM (~80% reduction). More aggressive than 8-bit but may affect numerical stability. Fallback to dense distillation is used.",
+    )
+    parser.add_argument(
         "--load_teacher_in_8bit",
         action="store_true",
-        help="Load teacher model in 8-bit quantization to save VRAM (~75% reduction). Only for inference, does not affect training quality.",
+        help="Load teacher model in 8-bit quantization to save VRAM (~75% reduction). Recommended over 4-bit for better numerical stability. Fallback to dense distillation is used.",
     )
 
     main_args = parser.parse_args()
