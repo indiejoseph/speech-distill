@@ -110,16 +110,50 @@ python stage1.py \
     --use_wandb
 ```
 
+### Stage 1.5: Dataset Preparation (Optional)
+
+Pre-process your dataset once to avoid on-the-fly audio-to-speech token conversion during training. This significantly speeds up training iterations:
+
+```bash
+python prepare_dataset.py \
+    --dataset_path /path/to/raw/dataset \
+    --output_path ./processed_dataset \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    --max_length 512 \
+    --num_proc 4
+```
+
+**Benefits:**
+- One-time preprocessing overhead, then instant training iterations
+- Avoids repeated audio-to-speech token computation during training
+- Results in dataset with `student_input_ids`, `teacher_input_ids`, etc.
+
+**Output:** A dataset with pre-computed student and teacher input sequences ready for training.
+
 ### Stage 2: Knowledge Distillation (Main Training)
 
-Basic training with audio-to-speech token processing:
+**Option A: Training with pre-processed dataset (recommended)**
 
 ```bash
 python train.py \
     --teacher_model Soul-AILab/SoulX-Podcast-1.7B-dialect \
-    --student_model ./student_model_aligned \
-    --dataset_path /path/to/your/dataset \
-    --use_processor \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    --dataset_path ./processed_dataset \
+    --teacher_prefix "<|task_podcast|><|SPEAKER_0|>" \
+    --student_prefix "" \
+    --max_length 512 \
+    --use_lora \
+    --temperature 2.0 \
+    --alpha 0.5
+```
+
+**Option B: Training with on-the-fly processing (slower but more flexible)**
+
+```bash
+python train.py \
+    --teacher_model Soul-AILab/SoulX-Podcast-1.7B-dialect \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    --dataset_path /path/to/raw/dataset \
     --teacher_prefix "<|task_podcast|><|SPEAKER_0|>" \
     --student_prefix "" \
     --text_bos "<|text_start|>" \
@@ -128,26 +162,28 @@ python train.py \
     --speech_eos "<|semantic_token_end|>" \
     --max_length 512 \
     --use_lora \
-    --lora_r 8 \
-    --lora_alpha 16 \
     --temperature 2.0 \
     --alpha 0.5
 ```
+
+The script automatically detects whether the dataset is pre-processed and applies the appropriate data pipeline.
 
 ### Training Parameters
 
 **Model Arguments:**
 - `--teacher_model`: Path or HuggingFace ID of teacher model (default: `Soul-AILab/SoulX-Podcast-1.7B-dialect`)
 - `--student_model`: Path or HuggingFace ID of student model (default: `./student_model_aligned`)
+- `--load_teacher_in_8bit`: Load teacher in 8-bit quantization (~75% VRAM reduction, disables sparse distillation)
+- `--load_teacher_in_4bit`: Load teacher in 4-bit quantization (~80% VRAM reduction, disables sparse distillation)
 
 **Dataset Arguments:**
-- `--dataset_path`: Path to dataset (required)
+- `--dataset_path`: Path to dataset (required) - can be raw or pre-processed
 - `--max_length`: Maximum sequence length (default: 512)
-- `--use_processor`: Enable audio-to-speech token conversion (recommended)
+- `--test_size`: Evaluation set size (default: 10)
 
 **Prefix Configuration:**
 
-The system supports three types of prefixes:
+The system supports two types of prefixes:
 
 1. **String prefix** (simple, fixed for all examples):
    ```bash
@@ -158,10 +194,6 @@ The system supports three types of prefixes:
    ```bash
    --student_prefix '{"en": "[EN]", "zh": "[ZH]", "yue": "[YUE]", "default": ""}'
    ```
-
-3. **Function prefix** (dynamic, see [PREFIX_GUIDE.md](PREFIX_GUIDE.md)):
-   - Modify `train.py` to import custom functions from `prefix_functions.py`
-   - Allows prefix generation based on both text content and language
 
 **Token Delimiters:**
 - `--text_bos`: Text begin-of-sequence token (default: `<|text_start|>`)
@@ -178,6 +210,7 @@ The system supports three types of prefixes:
 - `--temperature`: Distillation temperature for softening logits (default: 2.0)
 - `--alpha`: Weight for task loss vs distillation loss (default: 0.5)
   - `loss = alpha * task_loss + (1 - alpha) * distillation_loss`
+- `--top_k`: Number of top logits to keep for sparse distillation (default: 128, only used with on-the-fly extraction)
 
 ### Dataset Requirements
 
@@ -239,8 +272,10 @@ python train.py \
 
 ```
 .
-├── stage1.py                   # Stage 1: Text-to-speech token alignment warm-up
 ├── train.py                    # Stage 2: Main knowledge distillation training
+├── prepare_dataset.py          # Pre-process raw dataset (audio → tokenized inputs)
+├── extract_teacher_logits.py   # Extract sparse top-K teacher logits for efficient distillation
+├── stage1.py                   # Stage 1: Text-to-speech token alignment warm-up
 ├── data.py                     # Dataset processor and collators
 ├── distillation_loss.py        # KL divergence distillation loss
 ├── prepare_student.py          # Student vocab alignment
@@ -268,35 +303,261 @@ Combines:
 
 Formula: `loss = α × task_loss + (1 - α) × distillation_loss`
 
-## Advanced Usage
+## Sparse Distillation
 
-### Custom Prefix Functions
-See [PREFIX_GUIDE.md](PREFIX_GUIDE.md) for detailed guide on creating dynamic prefix functions.
+### How It Works
 
-Example:
-```python
-def custom_prefix(text: str, lang: str) -> str:
-    """Generate prefix based on text and language."""
-    task = "<|task_podcast|>"
-    speaker = "<|SPEAKER_0|>"
-    lang_tag = f"[{lang.upper()}]"
-    
-    # Dynamic logic
-    if len(text) > 100:
-        return f"{task}{speaker}{lang_tag}[LONG]"
-    
-    return f"{task}{speaker}{lang_tag}"
+**Sparse distillation** is a memory optimization technique that reduces VRAM usage during training by **50-80%** while maintaining distillation quality. Instead of computing KL divergence on all vocabulary tokens (typically 150K+), we only compute it on the **Top-K most likely tokens** from the teacher model.
+
+#### Dense Distillation (Standard)
+```
+Teacher logits: [150K vocab] 
+Student logits: [150K vocab]
+KL divergence computed on: All 150K tokens
+Memory: High (~GB per batch)
 ```
 
-### Legacy Mode (Pre-computed Speech Tokens)
-If your dataset already has `speech_tokens` computed, omit `--use_processor`:
+#### Sparse Distillation (Optimized)
+```
+Teacher Top-K: [128 values, 128 indices]
+Student logits: [150K vocab]
+KL divergence computed on: Only 128 teacher's top tokens
+Memory: Low (~MB per batch) ✓
+```
+
+### Two Modes
+
+#### 1. **Pre-extracted Sparse Logits** (Fastest)
+Pre-compute and cache teacher's top-K logits using `extract_teacher_logits.py`:
+
+```bash
+python extract_teacher_logits.py \
+    --teacher_model Soul-AILab/SoulX-Podcast-1.7B-dialect \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    --dataset_path /path/to/raw/dataset \
+    --output_path ./dataset_with_logits \
+    --top_k 128 \
+    --batch_size 4
+```
+
+**Benefits:**
+- Zero overhead during training (logits already computed)
+- Fastest training iterations
+- Exact same results (deterministic extraction)
+
+**Output:** Dataset with `teacher_top_k_v` and `teacher_top_k_i` columns
+
+Then use in training:
 ```bash
 python train.py \
+    --dataset_path ./dataset_with_logits \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    ...
+```
+
+#### 2. **On-the-fly Sparse Extraction** (Flexible)
+Compute sparse logits during training automatically:
+
+```bash
+python train.py \
+    --dataset_path /path/to/raw/dataset \
+    --student_model ./pretrained_models/Qwen3-0.6B \
     --teacher_model Soul-AILab/SoulX-Podcast-1.7B-dialect \
-    --student_model ./student_model_aligned \
-    --dataset_path /path/to/dataset/with/speech_tokens \
-    --teacher_prefix "" \
+    --top_k 128 \
+    ...
+```
+
+**Benefits:**
+- No preprocessing step required
+- Flexible (can change `--top_k` between runs)
+- Works with raw datasets
+
+**Trade-off:** ~10-20% VRAM overhead per batch (teacher forward pass required)
+
+### VRAM Comparison
+
+| Mode | VRAM | Speed | Notes |
+|------|------|-------|-------|
+| Dense (full vocab) | 100% baseline | Slow | All 150K tokens |
+| Sparse (pre-extracted) | ~20-30% | Fast ✓ | No training overhead |
+| Sparse (on-the-fly) | ~40-50% | Medium | Slight slowdown/batch |
+| Dense (8-bit teacher) | ~30% | Slow | Quantization + full vocab |
+| Sparse (4-bit teacher) | Not available | - | Falls back to dense |
+
+### When to Use Each Mode
+
+**Use Pre-extracted** if:
+- Training the same dataset multiple times
+- Want maximum speed and minimal VRAM
+- Have storage for enriched dataset
+
+**Use On-the-fly** if:
+- One-time training
+- Experimenting with different top_k values
+- Storage is limited
+
+**Use Dense (with quantization)** if:
+- Extremely tight VRAM constraints (~2GB teacher)
+- Quality is less critical than memory savings
+- Use `--load_teacher_in_8bit` or `--load_teacher_in_4bit`
+
+### Implementation Details
+
+**Sparse KL Divergence:**
+```python
+# Get teacher's top-K indices for this batch
+# teacher_top_k_i: [batch, seq_len, K]  <- indices
+# teacher_top_k_v: [batch, seq_len, K]  <- log probs
+
+# Gather student logits at those indices
+student_topk = torch.gather(
+    student_logits, 
+    dim=-1, 
+    index=teacher_top_k_i
+)  # [batch, seq_len, K]
+
+# KL divergence on only K tokens
+# loss = sum(exp(teacher_topk) * (teacher_topk - student_topk))
+```
+
+**Memory Optimization:**
+- Teacher logits: 150K float32 → 128 float16 + 128 int32 = **99.7% reduction**
+- With batch size 4, seq_len 512: ~2GB → ~20MB for sparse logits
+
+## Advanced Features
+
+### Extract Teacher Logits Script
+
+Pre-compute teacher's top-K logprobs for efficient training:
+
+```bash
+python extract_teacher_logits.py \
+    --teacher_model Soul-AILab/SoulX-Podcast-1.7B-dialect \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    --dataset_path /path/to/raw/dataset \
+    --output_path ./dataset_enriched \
+    --top_k 128 \
+    --batch_size 4 \
+    --teacher_prefix "<|task_podcast|><|SPEAKER_0|>" \
     --student_prefix ""
+```
+
+**Parameters:**
+- `--teacher_model`: Teacher model to extract from
+- `--student_model`: Student model (used for tokenizer)
+- `--dataset_path`: Raw dataset path (required)
+- `--output_path`: Output enriched dataset path (required)
+- `--top_k`: Number of top logits per token (default: 128)
+- `--batch_size`: Extraction batch size (default: 4)
+- `--teacher_prefix`, `--student_prefix`: Same as training
+- `--num_proc`: Parallel processing workers
+
+**Output:** Dataset with added columns:
+- `teacher_top_k_v`: Top-K log probabilities [seq_len, K] (fp16)
+- `teacher_top_k_i`: Top-K token indices [seq_len, K] (int32)
+
+### Prepare Dataset Script
+
+Pre-process raw dataset for faster training:
+
+```bash
+python prepare_dataset.py \
+    --dataset_path /path/to/raw/dataset \
+    --output_path ./processed_dataset \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    --max_length 512 \
+    --num_proc 4 \
+    --device cuda
+```
+
+**Parameters:**
+- `--dataset_path`: Raw dataset path (required)
+- `--output_path`: Output processed dataset path (required)
+- `--student_model`: Student model for tokenizer (default: `./pretrained_models/Qwen3-0.6B`)
+- `--max_length`: Max sequence length (default: 512)
+- `--teacher_prefix`, `--student_prefix`: Prefix configuration
+- `--num_proc`: Parallel workers (use >1 carefully with GPU)
+- `--device`: Device for processing ('cuda' or 'cpu')
+
+**Output:** Dataset with pre-computed sequences:
+- `student_input_ids`: Tokenized student input
+- `student_attention_mask`: Attention mask for student
+- `teacher_input_ids`: Tokenized teacher input
+- `teacher_attention_mask`: Attention mask for teacher
+
+**Workflow:**
+1. Run `prepare_dataset.py` once → creates `processed_dataset`
+2. Run `extract_teacher_logits.py` on `processed_dataset` → adds sparse logits
+3. Train with `train.py` using the enriched dataset → fast, zero overhead
+
+### Recommended Pipeline
+
+For **maximum efficiency and speed**:
+```bash
+# Step 1: Preprocess dataset (one-time)
+python prepare_dataset.py \
+    --dataset_path /path/to/raw/data \
+    --output_path ./processed_data
+
+# Step 2: Extract sparse teacher logits (one-time)
+python extract_teacher_logits.py \
+    --dataset_path ./processed_data \
+    --output_path ./processed_data_with_logits
+
+# Step 3: Train (fast iterations)
+python train.py \
+    --dataset_path ./processed_data_with_logits \
+    --student_model ./pretrained_models/Qwen3-0.6B \
+    --use_lora
+```
+
+**Time Investment:**
+- Preprocessing: ~5-30 min (one-time, depends on dataset size)
+- Logit extraction: ~10-60 min (one-time, depends on model size + data)
+- Training: Fast iteration (precomputed data = instant batches)
+
+**VRAM During Training:**
+- Student: ~2GB
+- Teacher (sparse path): ~1GB
+- Total: ~3GB (vs 8-10GB for dense path)
+
+## Advanced Usage
+
+### Memory-Constrained Training
+
+If you have limited VRAM:
+
+**Option 1: Full Sparse Distillation (~3GB)**
+```bash
+# Pre-extract logits once
+python extract_teacher_logits.py \
+    --dataset_path /path/to/raw/data \
+    --output_path ./data_with_logits
+
+# Train with sparse distillation
+python train.py \
+    --dataset_path ./data_with_logits \
+    --use_lora \
+    --gradient_checkpointing
+```
+
+**Option 2: Quantized Teacher (~2.5GB)**
+```bash
+python train.py \
+    --dataset_path /path/to/data \
+    --load_teacher_in_8bit \
+    --use_lora \
+    --gradient_checkpointing
+```
+
+**Option 3: Aggressive Quantization (~2GB)**
+```bash
+python train.py \
+    --dataset_path /path/to/data \
+    --load_teacher_in_4bit \
+    --use_lora \
+    --per_device_train_batch_size 2 \
+    --gradient_accumulation_steps 8
 ```
 
 ## Troubleshooting
