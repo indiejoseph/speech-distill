@@ -98,7 +98,7 @@ def prepare_dataset(config):
     print("Processing dataset (this may take a while)...")
     processed_dataset = dataset.map(
         distill_processor,
-        batched=True,
+        batched=True if config.batch_size > 1 else False,
         batch_size=config.batch_size,
         num_proc=config.num_proc,
         desc="Processing dataset",
@@ -202,7 +202,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=4,
+        default=1,
         help="Batch size for processing during dataset mapping (higher = faster but more memory)",
     )
     parser.add_argument(

@@ -23,7 +23,14 @@ from data import (
 
 class DistillationTrainer(Trainer):
     def __init__(
-        self, *args, teacher_model=None, temperature=2.0, alpha=0.5, top_k=100, **kwargs
+        self,
+        *args,
+        teacher_model=None,
+        temperature=2.0,
+        alpha=0.5,
+        top_k=100,
+        is_quantized_teacher=False,
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.teacher_model = teacher_model
@@ -31,6 +38,7 @@ class DistillationTrainer(Trainer):
             self.teacher_model.eval()
         self.top_k = top_k
         self.distill_loss_fn = DistillationLoss(temperature=temperature, alpha=alpha)
+        self.is_quantized_teacher = is_quantized_teacher
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         # Extract metadata
@@ -61,12 +69,13 @@ class DistillationTrainer(Trainer):
                 teacher_logits = teacher_outputs.logits
 
         # Extract sparse logits from full teacher logits if pre-calculated ones are missing
-        # NOTE: Skip sparse extraction for 8-bit quantized teachers (use dense instead)
-        # 8-bit quantization affects logit precision, making sparse top-K unreliable
+        # NOTE: Skip sparse extraction for quantized teachers or if top_k is 0 (use dense instead)
+        # Quantization (8-bit/4-bit) affects logit precision, making sparse top-K unreliable
         if (
             teacher_logits is not None
             and teacher_top_k_v is None
-            and not getattr(self, "_is_8bit_teacher", False)
+            and not self.is_quantized_teacher
+            and self.top_k > 0
         ):
             with torch.no_grad():
                 # Truncate to actual vocab size (in case model outputs extra logits)
@@ -140,15 +149,12 @@ def train(config):
         print("Loading teacher in 8-bit (quantized) for memory efficiency...")
         quantization_config = BitsAndBytesConfig(
             load_in_8bit=True,
-            bnb_8bit_compute_dtype=torch.bfloat16,
-            bnb_8bit_use_double_quant=True,
-            bnb_8bit_quant_type="nf8",
         )
         is_quantized = True
 
     teacher_model = AutoModelForCausalLM.from_pretrained(
         teacher_id,
-        torch_dtype=torch.bfloat16 if not config.load_teacher_in_8bit else None,
+        torch_dtype=torch.bfloat16 if not is_quantized else None,
         device_map="auto",
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
@@ -359,17 +365,20 @@ def train(config):
         temperature=config.temperature,
         alpha=config.alpha,
         top_k=config.top_k,
+        is_quantized_teacher=is_quantized,
     )
 
-    # Mark if teacher is quantized (affects sparse distillation)
-    trainer._is_8bit_teacher = is_quantized
     if is_quantized:
         quantization_mode = "4-bit" if config.load_teacher_in_4bit else "8-bit"
         print(
             f"⚠️  Teacher is {quantization_mode} quantized: using dense distillation (not sparse KL)"
         )
+    elif config.top_k <= 0:
+        print("✓ Teacher is full precision, but top_k <= 0: using dense distillation")
     else:
-        print("✓ Teacher is full precision: using sparse distillation")
+        print(
+            f"✓ Teacher is full precision: using sparse distillation (Top-{config.top_k})"
+        )
 
     # Print a sample to verify processing
     print("\n" + "=" * 50)
